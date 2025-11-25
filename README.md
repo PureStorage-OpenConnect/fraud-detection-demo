@@ -1,162 +1,158 @@
 # financial-fraud-demo
-Financial Fraud Detection: 5-Tier Container Architecture (Dual L40S Optimized)
+NVIDIA Financial Fraud Detection Pipeline (Dual L40S Optimized)
 
-This document outlines the proposed re-architecture of the NVIDIA Financial Fraud Detection blueprint into five scalable microservices, designed for deployment on a Kubernetes cluster leveraging dual NVIDIA L40S GPUs.
+🌟 Overview
 
-The workflow is strictly mapped to five decoupled, containerized services.
+This project re-architects the NVIDIA Financial Fraud Detection AI Blueprint into a highly scalable, containerized, 5-tier microservice pipeline optimized for dual NVIDIA L40S GPUs within a Kubernetes environment.
 
-0. Data Gathering Service (data-gather-service)
+This project is a brownfield redevelopment of the original solution, which can be found here:
 
-This service is the entry point, responsible for ingesting or generating the raw transactional data.
+Original Blueprint Documentation: NVIDIA Financial Fraud Detection
 
-Component
+Original GitHub Repository: NVIDIA-AI-Blueprints/Financial-Fraud-Detection
 
-Description
+The design focuses on decoupling the core machine learning workflow—data gathering, high-speed data preparation, distributed training, and real-time inference—into distinct, independently deployable services, ideal for demonstrating performance and scalability, particularly concerning high-speed I/O with Pure Storage mounts.
 
-Primary Goal
+⚙️ Architecture: 5-Tier Microservices
 
-Simulate pulling raw transaction data from source systems/APIs and saving it to persistent storage.
+The workflow is divided into five sequential or continuously running containers, with specific GPU allocation designed to maximize utilization of the dual L40S system.
 
-Input
+Stage
 
-N/A (Internal generation or external API access).
+Service Name
 
-Output
+Container Type
 
-Raw transaction data (CSV/Parquet) saved to shared storage.
+Primary GPU Allocation
 
-Key Technologies
+Core Responsibility
 
-Python, Standard I/O operations.
+0. Gather
 
-Scalability Model
+data-gather-service
 
-Designed as a Kubernetes Job that runs first, or an adapter for streaming platforms.
+K8s Job
 
-1. Data Preparation Service (data-prep-service)
+None
 
-This service transforms raw data into graph structures and features, maximizing use of the L40S GPUs to test Pure Storage I/O bandwidth.
+Generates/Ingests raw transactional data.
 
-Component
+1. Prep
 
-Description
+data-prep-service
 
-Primary Goal
+K8s Job
 
-High-speed ingestion of raw data, feature engineering, and building the graph structure.
+Dual L40S (2x)
 
-GPU Utilization
+High-speed, GPU-accelerated feature engineering and graph creation via RAPIDS (cuDF/cuGraph).
 
-Dual L40S (2x): Used to saturate I/O and accelerate processing via cuDF/cuGraph.
+2. Build
 
-Input
+model-build-service
 
-Raw transaction data from data-gather-service.
+K8s Job
 
-Output
+Dual L40S (2x)
 
-1. Graph Artifacts: Node features, Edge lists, Adjacency matrices (cuGraph-ready format). 2. Tabular Features: XGBoost-ready features for subsequent training.
+Distributed GNN and cuXGBoost training, saving models to the Triton Model Repository.
 
-Key Technologies
+3. Serve
 
-Python, RAPIDS (cuDF, cuGraph).
+inference-service
 
-Scalability Model
+K8s Deployment
 
-Designed as a Kubernetes Job with high GPU limits (2x L40S).
+Dual L40S (2x)
 
-2. Model Building Service (model-build-service)
+Real-time, low-latency fraud scoring using NVIDIA Triton Inference Server and TensorRT.
 
-This service consumes the prepared artifacts and executes the GNN and XGBoost training steps.
+4. Notify
 
-Component
+notification-service
 
-Description
+K8s Deployment
 
-Primary Goal
+None
 
-Load prepared features, train the GNN for embeddings, and train the final XGBoost model in a distributed fashion.
+Provides a webhook for receiving and simulating the streaming of high-risk transaction alerts.
 
-GPU Utilization
+🗺️ System Architecture
 
-Dual L40S (2x): Utilized for distributed training (GNNs via PyTorch/TF, cuXGBoost).
+This diagram illustrates the data flow and container orchestration across the 5 distinct microservices, highlighting the GPU allocation for performance-critical stages.
 
-Input
-
-Graph Artifacts and Tabular Features from the data-prep-service.
-
-Output
-
-1. GNN Model: Serialized GNN model. 2. XGBoost Model: Serialized XGBoost model. 3. Triton Model Repository: Optimized configuration files.
-
-Key Technologies
-
-Python, PyTorch/TensorFlow (for GNN), RAPIDS (cuML, cuXGBoost).
-
-Scalability Model
-
-Designed as a Kubernetes Job with high GPU resource limits (2x L40S).
-
-3. Inference Service (inference-service)
-
-This service hosts the trained models for real-time, low-latency scoring using Triton.
+🚀 Key Technology Stack
 
 Component
 
-Description
+Technology
 
-Primary Goal
+Rationale
 
-Real-time serving of transaction fraud scores with maximum throughput.
+GPUs
 
-GPU Utilization
+NVIDIA L40S (2x)
 
-Dual L40S (2x): Utilized by Triton for parallel execution and optimized serving (TensorRT).
+High-performance compute for all intensive stages. Explicitly configured for dual-GPU utilization.
 
-Input
+Data Prep
 
-Real-time transaction data (via REST/gRPC API request).
+RAPIDS (cuDF, cuGraph)
 
-Output
+Maximizes data processing speed and I/O saturation using the GPU memory.
 
-Fraud prediction score/label. Initiates notification callback on high-risk scores.
+Model Training
 
-Key Technologies
+RAPIDS (cuXGBoost), PyTorch/TensorFlow
 
-NVIDIA Triton Inference Server, TensorRT.
+Enables distributed and accelerated training of the GNN and final XGBoost classifier.
 
-Scalability Model
+Inference
 
-Designed as a Kubernetes Deployment/Service, autoscaling based on request load (HPA).
+NVIDIA Triton Inference Server
 
-4. Notification Service (notification-service)
+Production-grade model serving for high-throughput, low-latency real-time scoring.
 
-This service receives alerts from the Inference Service and simulates real-time stream processing.
+Orchestration
 
-Component
+Docker Compose, Kubernetes
 
-Description
+Provides a clear path from local validation (Docker) to scalable, resilient deployment (K8s).
 
-Primary Goal
+Persistence
 
-Provide a reliable webhook endpoint to receive high-risk transaction alerts and stream them to downstream consumers (e.g., fraud investigation team, Kafka queue).
+Shared PVC
 
-Input
+Simulates the connection to high-speed Pure Storage mounts (/data) for artifact sharing.
 
-JSON payload of high-risk transaction (transaction_id, fraud_score) from inference-service.
+📦 Data Flow and Persistence
 
-Output
+All intermediate data and final models are stored on a shared Persistent Volume mounted at /data across all containers. This design ensures artifacts are readily available for subsequent stages without needing to copy data between service executions.
 
-Streamed log output (mocking Kafka/Queue insertion).
+data-gather writes raw CSV to /data/raw_data/.
 
-Key Technologies
+data-prep reads the raw CSV and writes features/graphs to /data/artifacts/prep_output/.
 
-Python, Flask/FastAPI (Web Service).
+model-build reads the prepared features and writes deployable models to /data/model_repository/ (Triton's required format).
 
-Scalability Model
+triton-server reads the models directly from /data/model_repository/ and serves them.
 
-Standard Kubernetes Deployment/Service (no GPU needed).
+triton-server sends high-risk alerts to the notification-service endpoint (e.g., http://notification-service:5000/notify/fraud).
 
-Data Flow and Persistence
+🛠️ Deployment Strategy
 
-Model artifacts and prepared data must be shared between services using a shared Persistent Volume Claim (PVC) mounted across all pods at /data, which maps to your Pure Storage mounts.
+The project follows a two-phase deployment strategy:
+
+Phase 1: Local Validation (Docker Compose)
+
+Before deploying to Kubernetes, the entire pipeline can be built and executed locally using docker-compose.yaml. This validates container images, script execution order, volume mounting, and the inter-service data dependencies on a single host with GPU access.
+
+Phase 2: Scalable Deployment (Kubernetes)
+
+Once local validation is complete, the k8s_manifests.yaml file defines the full production environment, including:
+
+K8s Jobs for the batch stages (Gather, Prep, Build).
+
+K8s Deployments and Services for the continuous services (Inference, Notification).
+
+Explicit GPU resource requests (nvidia.com/gpu: 2) to leverage the dual-L40S system effectively.
