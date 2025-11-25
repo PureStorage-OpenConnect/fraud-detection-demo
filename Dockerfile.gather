@@ -1,0 +1,14 @@
+# Dockerfile.gather - Data Gathering Service
+FROM python:3.10-slim
+
+# Set a working directory
+WORKDIR /app
+
+# Copy the scaffold script
+COPY data_gather.py /app/
+
+# Install necessary libraries (e.g., numpy for mock data generation)
+RUN pip install --no-cache-dir numpy
+
+# The entrypoint runs the gathering script
+ENTRYPOINT ["python3", "data_gather.py"]

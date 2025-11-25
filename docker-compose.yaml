@@ -1,0 +1,92 @@
+version: '3.8'
+
+# Define a volume for persistent storage across containers, mapped to your Pure Storage mounts.
+volumes:
+  fraud-data-pvc:
+
+services:
+
+  # 0. Data Gathering Service (Runs first, no GPU needed)
+  data_gather:
+    build:
+      context: .
+      dockerfile: Dockerfile.gather
+    image: fraud-gather:latest
+    volumes:
+      - fraud-data-pvc:/data
+    entrypoint: ["python3", "/app/data_gather.py"]
+
+  # 1. Data Preparation Service (Runs second, uses 2 GPUs for I/O testing)
+  data_prep:
+    build:
+      context: .
+      dockerfile: Dockerfile.prep
+    image: fraud-prep:latest
+    volumes:
+      - fraud-data-pvc:/data
+    # Request 2 L40S GPUs to test I/O
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+    entrypoint: ["python3", "/app/data_prep.py"]
+    depends_on:
+      - data_gather # Must wait for raw data
+
+  # 2. Model Building Service (Runs third, uses 2 GPUs for training)
+  model_build:
+    build:
+      context: .
+      dockerfile: Dockerfile.train
+    image: fraud-train:latest
+    volumes:
+      - fraud-data-pvc:/data
+    # Request 2 L40S GPUs for multi-GPU training
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+    entrypoint: ["python3", "/app/model_build.py"]
+    depends_on:
+      - data_prep # Must wait for prepared features
+
+  # 3. Inference Service (Runs continuously, uses 2 GPUs for max throughput)
+  triton_server:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve
+    image: fraud-serve:latest
+    volumes:
+      - fraud-data-pvc:/data
+    ports:
+      - "8000:8000" # HTTP/REST
+      - "8001:8001" # gRPC
+    # Request 2 L40S GPUs for max inference throughput
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+    depends_on:
+      - model_build # Must wait for trained models
+      - notification_service # Ensure notification service is running for callbacks
+  
+  # 4. Notification Service (Runs continuously, no GPU needed)
+  notification_service:
+    build:
+      context: .
+      dockerfile: Dockerfile.notify
+    image: fraud-notify:latest
+    ports:
+      - "5000:5000" # Expose the notification endpoint
+    # No GPU required
+    depends_on:
+      - model_build # Logically depends on the models being built, though runs continuously
