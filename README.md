@@ -24,12 +24,12 @@ graph LR
     B -->|Load| E[Pod 4<br/>Inference<br/>2x L40S<br/>Triton]
     E -->|Alerts| F[Pod 5<br/>Notification]
     
-    style A fill:#e3f2fd
-    style C fill:#c8e6c9
-    style D fill:#c8e6c9
-    style E fill:#c8e6c9
-    style F fill:#fff9c4
-    style B fill:#f3e5f5
+    style A fill:#1a5490,stroke:#333,stroke-width:2px,color:#fff
+    style C fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
+    style D fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
+    style E fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
+    style F fill:#1a5490,stroke:#333,stroke-width:2px,color:#fff
+    style B fill:#ffb366,stroke:#333,stroke-width:2px,color:#fff
 ```
 
 ---
