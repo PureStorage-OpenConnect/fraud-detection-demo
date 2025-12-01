@@ -3,6 +3,8 @@
 [![NVIDIA](https://img.shields.io/badge/NVIDIA-L40S-76B900?logo=nvidia)](https://www.nvidia.com/)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![RAPIDS](https://img.shields.io/badge/RAPIDS-cuDF%20%7C%20cuGraph-blueviolet)](https://rapids.ai/)
+[![FlashArray](https://img.shields.io/badge/Pure_Storage-FlashArray-FF6600)](https://www.purestorage.com/products/unified-block-file-storage.html)
+[![FlashBlade](https://img.shields.io/badge/Pure_Storage-FlashBlade-FF6600)](https://www.purestorage.com/products/unstructured-data-storage/flashblade-s.html)
 
 ## Overview
 
@@ -15,21 +17,29 @@ This project is a redevelopment focusing on WHY PURE? of the **Original Blueprin
 ## System Architecture
 
 ```mermaid
-graph LR
-    A[Pod 1<br/>Data Gather] -->|CSV| B[Shared Volume<br/>/data]
-    B -->|Read| C[Pod 2<br/>Data Prep<br/>2x L40S]
-    C -->|Features| B
-    B -->|Read| D[Pod 3<br/>Model Build<br/>2x L40S]
-    D -->|Models| B
-    B -->|Load| E[Pod 4<br/>Inference<br/>2x L40S<br/>Triton]
+graph TB
+    A[Pod 1<br/>Data Gather] -->|CSV| C[Pod 2<br/>Data Prep<br/>2x L40S]
+    C -->|Features| D[Pod 3<br/>Model Build<br/>2x L40S]
+    D -->|Models| E[Pod 4<br/>Inference<br/>2x L40S<br/>Triton]
     E -->|Alerts| F[Pod 5<br/>Notification]
+    
+    A -.->|Write Raw Data| FB[FB<br/>FlashBlade S200<br/>Parallel I/O]
+    A -.->|Archive| S3[S3<br/>Object Storage]
+    C -.->|Read/Write Features| FB
+    D -.->|Read Training Data| FB
+    D -.->|Write Models| FA[FA<br/>FlashArray X70R3<br/>Low Latency]
+    D -.->|Version Models| S3
+    E -.->|Load Models| FA
+    FB <-.->|Integrated| S3
     
     style A fill:#1a5490,stroke:#333,stroke-width:2px,color:#fff
     style C fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style D fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style E fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style F fill:#1a5490,stroke:#333,stroke-width:2px,color:#fff
-    style B fill:#ffb366,stroke:#333,stroke-width:2px,color:#fff
+    style FA fill:#ffb366,stroke:#333,stroke-width:2px,color:#fff
+    style FB fill:#ffb366,stroke:#333,stroke-width:2px,color:#fff
+    style S3 fill:#ffb366,stroke:#333,stroke-width:2px,color:#fff
 ```
 
 ---
