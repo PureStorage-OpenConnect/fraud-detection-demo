@@ -1,0 +1,7 @@
+cudf-cu12==23.10.*
+cuml-cu12==23.10.*
+cugraph-cu12==23.10.*
+xgboost==2.0.2
+torch-geometric==2.4.0
+boto3==1.34.34
+pyarrow==14.0.1

@@ -71,9 +71,9 @@ graph TB
 - **Inference**: NVIDIA Triton Inference Server
 - **Orchestration**: Docker Compose
 - **Storage**: 
-  - **FA (FlashArray X70R3)**: Low-latency file storage
-  - **FB (FlashBlade S200)**: Parallel I/O, file + S3 protocol
-  - **S3**: Object storage for archival and versioning
+  - **FA**: Low-latency 
+  - **FB**: file + S3 protocol
+    - **S3**: Object storage for archival and versioning
 
 ---
 
@@ -222,65 +222,6 @@ curl -X POST http://localhost:8000/v2/models/fraud_xgboost/infer \
 
 ---
 
-## Docker Compose Configuration
-
-```yaml
-version: '3.8'
-
-services:
-  data-gather:
-    build: ./pods/1-data-gather
-    volumes:
-      - ./data:/data
-    
-  data-prep:
-    build: ./pods/2-data-prep
-    volumes:
-      - ./data:/data
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 2
-              capabilities: [gpu]
-    
-  model-build:
-    build: ./pods/3-model-build
-    volumes:
-      - ./data:/data
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 2
-              capabilities: [gpu]
-    
-  inference:
-    build: ./pods/4-inference
-    ports:
-      - "8000:8000"  # HTTP
-      - "8001:8001"  # gRPC
-      - "8002:8002"  # Metrics
-    volumes:
-      - ./data:/data
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 2
-              capabilities: [gpu]
-    
-  notification:
-    build: ./pods/5-notification
-    ports:
-      - "5000:5000"
-```
-
----
-
 ## Data Flow
 
 ### Storage Paths
@@ -424,25 +365,30 @@ docker-compose down
 
 ---
 
-## License
+## 📞 Contact(s)
 
-Apache License 2.0 - see [LICENSE](LICENSE) file
+**Project Maintainers**: Emir Biser and Ed Hsu - your friendly AAI FSAs
 
----
-
-## Acknowledgments
-
-- NVIDIA AI Blueprints Team
-- NVIDIA RAPIDS Team
-- NVIDIA Triton Inference Server Team
-- Pure Storage FlashArray and FlashBlade Engineering Teams
-
----
-
-## Contact
+- 📧 Email: ebiser@purestorage.com and ehsu@purestorage.com
 
 **Repository**: [https://github.com/yourusername/nvidia-fraud-detection-pipeline](https://github.com/yourusername/nvidia-fraud-detection-pipeline)
 
 ---
 
-**Built for High-Performance Fraud Detection with Docker & NVIDIA L40S GPUs**
+## 🎯 Roadmap
+
+- [ ] Add streaming data ingestion support (Kafka integration)
+- [ ] Implement A/B testing for model versions
+- [ ] Add automated model retraining pipeline
+- [ ] Integrate with MLflow for experiment tracking
+- [ ] Support for additional GPU architectures (A100, H100)
+- [ ] Add comprehensive benchmark suite
+- [ ] Develop web-based monitoring dashboard
+
+---
+
+## License
+
+Apache License 2.0 - see [LICENSE](LICENSE) file
+
+---

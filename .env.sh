@@ -1,0 +1,16 @@
+# Storage Configuration
+FB_MOUNT=/mnt/fsaai-shared/ebiser
+FA_MOUNT=~/ebiser/nvidia.financial.fraud.detection
+
+# S3 Configuration (FlashBlade S3 Endpoint)
+S3_ENDPOINT=https://your-flashblade-endpoint.com
+S3_ACCESS_KEY=your_s3_access_key_here
+S3_SECRET_KEY=your_s3_secret_key_here
+S3_BUCKET=fraud-detection-bucket
+
+# Data Generation
+NUM_TRANSACTIONS=1000000
+
+# Optional: Specify input files
+INPUT_FILE=
+FEATURES_FILE=
