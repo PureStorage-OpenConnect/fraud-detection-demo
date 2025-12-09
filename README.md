@@ -57,13 +57,48 @@ graph TB
 **Data Flow**: Raw data (FB) → Prepared features (FB) → Trained models (FA) → Real-time predictions → Alerts
 
 **Storage Strategy**:
-- **FA (FlashArray X70R3)**: Low-latency model serving and storage
-- **FB (FlashBlade S200)**: High-throughput parallel I/O for data processing
-- **S3**: Model versioning and raw data archival
+
+This architecture leverages Pure Storage's dual-protocol approach with optimized storage placement for different workload characteristics:
+
+### File Storage (NFS Mounts)
+- **FA**: `/root/ebiser/nvidia.financial.fraud.detection`
+  - **Protocol**: NFS file mount
+  - **Optimized for**: Low-latency random I/O (<1ms read latency)
+  - **Use case**: Real-time model serving where inference requests require immediate model access
+  - **Pods**: Pod 3 (writes models), Pod 4 (reads models for serving)
+  
+- **FB**: `/mnt/fsaai-shared/ebiser`
+  - **Protocol**: NFS file mount
+  - **Optimized for**: High-throughput parallel I/O (>5GB/s)
+  - **Use case**: Bulk data processing where multiple GPU workers read/write large datasets simultaneously
+  - **Pods**: Pod 1 (writes raw data), Pod 2 (reads/writes features), Pod 3 (reads training data)
+
+### Object Storage (S3 Protocol)
+- **FB S3 Endpoint**: `s3://fraud-detection-bucket`
+  - **Protocol**: S3 API on FlashBlade
+  - **Optimized for**: Archival, versioning, and cross-region access
+  - **Use case**: Long-term storage of raw data archives and model versions for compliance and rollback
+  - **Pods**: Pod 1 (archives raw data), Pod 3 (versions trained models)
+
+**Mount Configuration**:
+```bash
+# FlashArray (FA) - Low Latency NFS Mount
+mount -t nfs fa-array.example.com:/volume/fraud-models \
+  ~/ebiser/nvidia.financial.fraud.detection
+
+# FlashBlade (FB) - High Throughput NFS Mount  
+mount -t nfs fb-array.example.com:/export/fraud-data \
+  /mnt/fsaai-shared/ebiser
+
+# FlashBlade S3 - Configure endpoint in .env
+S3_ENDPOINT=https://fb-array.example.com
+```
+
+This separation ensures that high-throughput ETL operations (data prep, feature engineering) don't interfere with latency-sensitive inference serving, while S3 provides durable archival storage.
 
 ---
 
-## Technology Stack
+## Infrastructure and Technology Stack
 
 - **GPUs**: 2x NVIDIA L40S (48GB each)
 - **Data Processing**: RAPIDS (cuDF, cuGraph)
@@ -71,9 +106,9 @@ graph TB
 - **Inference**: NVIDIA Triton Inference Server
 - **Orchestration**: Docker Compose
 - **Storage**: 
-  - **FA**: Low-latency 
-  - **FB**: file + S3 protocol
-    - **S3**: Object storage for archival and versioning
+  - **FA (FlashArray X70R3)**: Low-latency file storage
+  - **FB (FlashBlade S200)**: Parallel I/O, file + S3 protocol
+  - **S3**: Object storage for archival and versioning
 
 ---
 
@@ -85,9 +120,8 @@ graph TB
 # Required Hardware
 - 2x NVIDIA L40S GPUs (48GB each)
 - 1024 GB RAM (512 GB per CPU)
-- Pure Storage FlashArray X70R3 (FA)
-- Pure Storage FlashBlade S200 (FB)
-- 4x 25Gb Cisco VIC NICs
+- Pure Storage FlashArray (FA)
+- Pure Storage FlashBlade (FB)
 
 # Required Software
 - Ubuntu 22.04.5 LTS
@@ -222,6 +256,65 @@ curl -X POST http://localhost:8000/v2/models/fraud_xgboost/infer \
 
 ---
 
+## Docker Compose Configuration
+
+```yaml
+version: '3.8'
+
+services:
+  data-gather:
+    build: ./pods/1-data-gather
+    volumes:
+      - ./data:/data
+    
+  data-prep:
+    build: ./pods/2-data-prep
+    volumes:
+      - ./data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+    
+  model-build:
+    build: ./pods/3-model-build
+    volumes:
+      - ./data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+    
+  inference:
+    build: ./pods/4-inference
+    ports:
+      - "8000:8000"  # HTTP
+      - "8001:8001"  # gRPC
+      - "8002:8002"  # Metrics
+    volumes:
+      - ./data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+    
+  notification:
+    build: ./pods/5-notification
+    ports:
+      - "5000:5000"
+```
+
+---
+
 ## Data Flow
 
 ### Storage Paths
@@ -263,7 +356,7 @@ s3://fraud-detection-bucket/
 
 1. **Pod 1** generates synthetic transactions → **FB** `/raw_data/` + **S3** archive
 2. **Pod 2** reads from **FB**, processes with RAPIDS → **FB** `/prep_output/`
-3. **Pod 3** reads features from **FB**, trains models → **FA** `/model_repository/` + **S3** versions
+3. **Pod 3** reads features from **FB**, trains models → **FA** `/model_repository/` + **FB** **S3** versions
 4. **Pod 4** loads models from **FA**, serves predictions via Triton
 5. **Pod 5** receives alerts from Pod 4 when fraud detected
 
@@ -365,30 +458,16 @@ docker-compose down
 
 ---
 
-## 📞 Contact(s)
-
-**Project Maintainers**: Emir Biser and Ed Hsu - your friendly AAI FSAs
-
-- 📧 Email: ebiser@purestorage.com and ehsu@purestorage.com
-
-**Repository**: [https://github.com/yourusername/nvidia-fraud-detection-pipeline](https://github.com/yourusername/nvidia-fraud-detection-pipeline)
-
----
-
-## 🎯 Roadmap
-
-- [ ] Add streaming data ingestion support (Kafka integration)
-- [ ] Implement A/B testing for model versions
-- [ ] Add automated model retraining pipeline
-- [ ] Integrate with MLflow for experiment tracking
-- [ ] Support for additional GPU architectures (A100, H100)
-- [ ] Add comprehensive benchmark suite
-- [ ] Develop web-based monitoring dashboard
-
----
-
 ## License
 
 Apache License 2.0 - see [LICENSE](LICENSE) file
 
 ---
+
+## Contact
+
+**Repository**: [https://github.com/yourusername/nvidia-fraud-detection-pipeline](https://github.com/yourusername/nvidia-fraud-detection-pipeline)
+
+---
+
+**Built for High-Performance Fraud Detection with Docker & NVIDIA L40S GPUs**
