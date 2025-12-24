@@ -71,8 +71,8 @@ This demo uses Pure Storage for high-performance data access:
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/nvidia-fraud-detection-pipeline.git
-cd nvidia-fraud-detection-pipeline
+git clone https://github.com/PureStorage-OpenConnect/financial-fraud-demo.git
+cd financial-fraud-demo
 
 # Build containers
 docker-compose build
