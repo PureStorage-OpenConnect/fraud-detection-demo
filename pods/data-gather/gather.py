@@ -1,223 +1,443 @@
 #!/usr/bin/env python3
 """
-Pod 1: Data Gather Service
-Generates synthetic transaction data for fraud detection training and testing.
-Based on NVIDIA Financial Fraud Detection Blueprint.
+Pod 1: High-Performance Data Gather Service
+============================================
+Stress-testing tool for Pure Storage FlashBlade that generates massive amounts
+of synthetic credit card transaction data using parallel workers.
+
+Features:
+- 128 parallel worker threads writing simultaneously
+- Schema-based generation from Kaggle creditcard.csv template
+- Continuous append mode for sustained I/O pressure
+- Real-time throughput monitoring (MB/s, Records/s)
+- Configurable runtime duration (default: 5 minutes)
 """
 
 import os
 import sys
+import time
 import logging
+import signal
+import threading
+from pathlib import Path
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from typing import Optional
+import queue
+
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-import boto3
-from pathlib import Path
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-class TransactionDataGenerator:
-    """Generate synthetic transaction data for fraud detection"""
+
+@dataclass
+class WorkerStats:
+    """Statistics for a single worker thread"""
+    worker_id: int
+    records_written: int = 0
+    bytes_written: int = 0
+    chunks_written: int = 0
+
+
+@dataclass
+class GlobalStats:
+    """Aggregated statistics across all workers"""
+    total_records: int = 0
+    total_bytes: int = 0
+    start_time: float = 0.0
     
-    def __init__(self, fb_mount: str, s3_bucket: str = None):
-        self.fb_mount = Path(fb_mount)
-        self.raw_data_path = self.fb_mount / "raw_data"
-        self.s3_bucket = s3_bucket
-        self.s3_client = None
+    def records_per_second(self) -> float:
+        elapsed = time.time() - self.start_time
+        return self.total_records / elapsed if elapsed > 0 else 0
+    
+    def mb_per_second(self) -> float:
+        elapsed = time.time() - self.start_time
+        return (self.total_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+    
+    def gb_written(self) -> float:
+        return self.total_bytes / (1024 * 1024 * 1024)
+
+
+class SchemaTemplate:
+    """Loads and analyzes schema from template CSV file"""
+    
+    def __init__(self, template_path: Path):
+        self.template_path = template_path
+        self.columns: list = []
+        self.dtypes: dict = {}
+        self.stats: dict = {}  # min, max, mean, std for numeric columns
+        self._load_template()
+    
+    def _load_template(self):
+        """Load schema from creditcard.csv template"""
+        logger.info(f"Loading schema template from: {self.template_path}")
         
-        # Create directories
-        self.raw_data_path.mkdir(parents=True, exist_ok=True)
+        if not self.template_path.exists():
+            raise FileNotFoundError(f"Template file not found: {self.template_path}")
         
-        # Initialize S3 client if bucket specified
-        if self.s3_bucket:
-            try:
-                s3_endpoint = os.getenv('S3_ENDPOINT')
-                s3_access_key = os.getenv('S3_ACCESS_KEY')
-                s3_secret_key = os.getenv('S3_SECRET_KEY')
+        # Read sample to get schema (first 10k rows for stats)
+        df_sample = pd.read_csv(self.template_path, nrows=10000)
+        
+        self.columns = list(df_sample.columns)
+        self.dtypes = df_sample.dtypes.to_dict()
+        
+        # Calculate statistics for each numeric column
+        for col in self.columns:
+            if np.issubdtype(df_sample[col].dtype, np.number):
+                self.stats[col] = {
+                    'min': float(df_sample[col].min()),
+                    'max': float(df_sample[col].max()),
+                    'mean': float(df_sample[col].mean()),
+                    'std': float(df_sample[col].std())
+                }
+        
+        logger.info(f"Schema loaded: {len(self.columns)} columns")
+        logger.info(f"Columns: {', '.join(self.columns[:5])}... (and {len(self.columns)-5} more)")
+
+
+class SyntheticDataGenerator:
+    """Generates synthetic data matching the template schema"""
+    
+    def __init__(self, schema: SchemaTemplate, seed: Optional[int] = None):
+        self.schema = schema
+        self.rng = np.random.default_rng(seed)
+    
+    def generate_chunk(self, num_rows: int) -> pd.DataFrame:
+        """Generate a chunk of synthetic data matching the schema"""
+        data = {}
+        
+        for col in self.schema.columns:
+            if col in self.schema.stats:
+                stats = self.schema.stats[col]
                 
-                if s3_endpoint and s3_access_key and s3_secret_key:
-                    self.s3_client = boto3.client(
-                        's3',
-                        endpoint_url=s3_endpoint,
-                        aws_access_key_id=s3_access_key,
-                        aws_secret_access_key=s3_secret_key
-                    )
-                    logger.info(f"S3 client initialized for endpoint: {s3_endpoint}")
+                if col == 'Class':
+                    # Fraud label: ~0.17% fraud rate (matching original dataset)
+                    data[col] = self.rng.choice([0, 1], size=num_rows, p=[0.9983, 0.0017])
+                elif col == 'Time':
+                    # Time in seconds (0 to ~172800 for 2 days)
+                    data[col] = self.rng.uniform(0, 172800, size=num_rows)
+                elif col == 'Amount':
+                    # Log-normal distribution for transaction amounts
+                    data[col] = np.abs(self.rng.lognormal(mean=3.0, sigma=2.0, size=num_rows))
+                    data[col] = np.clip(data[col], 0, 25000)  # Cap at reasonable max
                 else:
-                    logger.warning("S3 credentials not configured")
-            except Exception as e:
-                logger.warning(f"Could not initialize S3 client: {e}")
+                    # V1-V28 features: normal distribution based on observed stats
+                    data[col] = self.rng.normal(
+                        loc=stats['mean'],
+                        scale=max(stats['std'], 0.01),  # Prevent zero std
+                        size=num_rows
+                    )
+            else:
+                # Non-numeric columns (shouldn't exist in creditcard.csv but handle anyway)
+                data[col] = ['synthetic'] * num_rows
+        
+        return pd.DataFrame(data)
+
+
+class DataWriter:
+    """Handles file I/O with buffering for maximum throughput"""
     
-    def generate_users(self, num_users: int = 10000) -> pd.DataFrame:
-        """Generate synthetic user profiles"""
-        logger.info(f"Generating {num_users} user profiles...")
-        
-        users = pd.DataFrame({
-            'user_id': range(num_users),
-            'account_age_days': np.random.randint(1, 3650, num_users),
-            'credit_limit': np.random.choice([1000, 2500, 5000, 10000, 25000], num_users),
-            'risk_score': np.random.uniform(0, 1, num_users),
-            'is_fraudster': np.random.choice([0, 1], num_users, p=[0.98, 0.02])
-        })
-        
-        return users
+    def __init__(self, output_path: Path, worker_id: int, buffer_size: int = 10000):
+        self.output_path = output_path
+        self.worker_id = worker_id
+        self.buffer_size = buffer_size
+        self.file_path = output_path / f"thread_{worker_id:03d}_data.csv"
+        self.header_written = False
     
-    def generate_merchants(self, num_merchants: int = 1000) -> pd.DataFrame:
-        """Generate synthetic merchant profiles"""
-        logger.info(f"Generating {num_merchants} merchant profiles...")
+    def write_chunk(self, df: pd.DataFrame) -> int:
+        """Write a chunk of data, returns bytes written"""
+        mode = 'a' if self.header_written else 'w'
+        header = not self.header_written
         
-        categories = ['grocery', 'restaurant', 'retail', 'online', 'gas', 
-                     'travel', 'entertainment', 'healthcare', 'utilities']
+        # Convert to CSV string for size calculation
+        csv_data = df.to_csv(index=False, header=header)
+        bytes_written = len(csv_data.encode('utf-8'))
         
-        merchants = pd.DataFrame({
-            'merchant_id': range(num_merchants),
-            'category': np.random.choice(categories, num_merchants),
-            'avg_transaction_amount': np.random.uniform(10, 500, num_merchants),
-            'fraud_rate': np.random.uniform(0, 0.05, num_merchants)
-        })
+        # Write to file
+        with open(self.file_path, mode) as f:
+            f.write(csv_data)
         
-        return merchants
+        self.header_written = True
+        return bytes_written
+
+
+class WorkerThread:
+    """Individual worker that generates and writes data"""
     
-    def generate_transactions(
-        self, 
-        users: pd.DataFrame, 
-        merchants: pd.DataFrame,
-        num_transactions: int = 1000000
-    ) -> pd.DataFrame:
-        """Generate synthetic transaction data"""
-        logger.info(f"Generating {num_transactions} transactions...")
-        
-        # Random selection of users and merchants
-        user_ids = np.random.choice(users['user_id'].values, num_transactions)
-        merchant_ids = np.random.choice(merchants['merchant_id'].values, num_transactions)
-        
-        # Generate timestamps (last 30 days)
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=30)
-        timestamps = [
-            start_date + timedelta(seconds=np.random.randint(0, 30*24*60*60))
-            for _ in range(num_transactions)
-        ]
-        
-        # Generate transaction amounts
-        amounts = np.random.lognormal(mean=4.0, sigma=1.5, size=num_transactions)
-        amounts = np.clip(amounts, 1, 10000)
-        
-        transactions = pd.DataFrame({
-            'transaction_id': range(num_transactions),
-            'timestamp': timestamps,
-            'user_id': user_ids,
-            'merchant_id': merchant_ids,
-            'amount': amounts,
-            'currency': 'USD',
-            'transaction_type': np.random.choice(['credit', 'debit'], num_transactions, p=[0.7, 0.3]),
-            'channel': np.random.choice(['online', 'in-store', 'atm'], num_transactions, p=[0.5, 0.4, 0.1])
-        })
-        
-        # Merge with user and merchant data to determine fraud labels
-        transactions = transactions.merge(users[['user_id', 'is_fraudster']], on='user_id')
-        transactions = transactions.merge(merchants[['merchant_id', 'fraud_rate']], on='merchant_id')
-        
-        # Determine if transaction is fraudulent
-        fraud_probability = (
-            transactions['is_fraudster'] * 0.8 + 
-            transactions['fraud_rate'] * 0.2
-        )
-        transactions['is_fraud'] = (np.random.random(num_transactions) < fraud_probability).astype(int)
-        
-        # Drop helper columns
-        transactions = transactions.drop(['is_fraudster', 'fraud_rate'], axis=1)
-        
-        # Sort by timestamp
-        transactions = transactions.sort_values('timestamp').reset_index(drop=True)
-        
-        logger.info(f"Generated {len(transactions)} transactions with {transactions['is_fraud'].sum()} fraud cases ({transactions['is_fraud'].mean()*100:.2f}%)")
-        
-        return transactions
+    def __init__(
+        self,
+        worker_id: int,
+        schema: SchemaTemplate,
+        output_path: Path,
+        stats_queue: queue.Queue,
+        stop_event: threading.Event,
+        chunk_size: int = 10000
+    ):
+        self.worker_id = worker_id
+        self.generator = SyntheticDataGenerator(schema, seed=worker_id * 12345)
+        self.writer = DataWriter(output_path, worker_id)
+        self.stats_queue = stats_queue
+        self.stop_event = stop_event
+        self.chunk_size = chunk_size
+        self.stats = WorkerStats(worker_id=worker_id)
     
-    def save_to_flashblade(self, data: pd.DataFrame, filename: str):
-        """Save data to FlashBlade storage"""
-        filepath = self.raw_data_path / filename
-        logger.info(f"Saving data to FlashBlade: {filepath}")
-        
-        data.to_csv(filepath, index=False)
-        
-        file_size_mb = filepath.stat().st_size / (1024 * 1024)
-        logger.info(f"Successfully saved {len(data)} records ({file_size_mb:.2f} MB)")
-    
-    def archive_to_s3(self, filename: str):
-        """Archive data to S3 for long-term storage"""
-        if not self.s3_client:
-            logger.warning("S3 client not initialized, skipping archive")
-            return
-        
-        local_path = self.raw_data_path / filename
-        s3_key = f"raw_archives/{filename}"
+    def run(self):
+        """Main worker loop - generate and write until stopped"""
+        logger.debug(f"Worker {self.worker_id} started")
         
         try:
-            logger.info(f"Archiving to S3: s3://{self.s3_bucket}/{s3_key}")
-            self.s3_client.upload_file(str(local_path), self.s3_bucket, s3_key)
-            logger.info("Successfully archived to S3")
+            while not self.stop_event.is_set():
+                # Generate chunk
+                chunk = self.generator.generate_chunk(self.chunk_size)
+                
+                # Write chunk
+                bytes_written = self.writer.write_chunk(chunk)
+                
+                # Update stats
+                self.stats.records_written += len(chunk)
+                self.stats.bytes_written += bytes_written
+                self.stats.chunks_written += 1
+                
+                # Report stats periodically (every 10 chunks)
+                if self.stats.chunks_written % 10 == 0:
+                    self.stats_queue.put(self.stats)
+                    self.stats = WorkerStats(worker_id=self.worker_id)
+                    
         except Exception as e:
-            logger.error(f"Failed to archive to S3: {e}")
+            logger.error(f"Worker {self.worker_id} error: {e}")
+        finally:
+            # Final stats report
+            if self.stats.records_written > 0:
+                self.stats_queue.put(self.stats)
+            logger.debug(f"Worker {self.worker_id} stopped")
+
+
+class StatsAggregator:
+    """Collects and reports statistics from all workers"""
     
-    def run(self, num_transactions: int = 1000000):
-        """Main execution method"""
-        logger.info("=" * 60)
-        logger.info("Pod 1: Data Gather Service - Starting")
-        logger.info("=" * 60)
+    def __init__(self, stats_queue: queue.Queue, report_interval: float = 5.0):
+        self.stats_queue = stats_queue
+        self.report_interval = report_interval
+        self.global_stats = GlobalStats(start_time=time.time())
+        self.stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._last_report_time = time.time()
+        self._last_records = 0
+        self._last_bytes = 0
+    
+    def collect_stats(self):
+        """Collect stats from queue (non-blocking)"""
+        while True:
+            try:
+                worker_stats = self.stats_queue.get_nowait()
+                with self._lock:
+                    self.global_stats.total_records += worker_stats.records_written
+                    self.global_stats.total_bytes += worker_stats.bytes_written
+            except queue.Empty:
+                break
+    
+    def should_report(self) -> bool:
+        return time.time() - self._last_report_time >= self.report_interval
+    
+    def report(self):
+        """Print current throughput statistics"""
+        self.collect_stats()
         
-        # Generate synthetic data
-        users = self.generate_users()
-        merchants = self.generate_merchants()
-        transactions = self.generate_transactions(users, merchants, num_transactions)
+        with self._lock:
+            elapsed = time.time() - self._last_report_time
+            
+            # Calculate interval rates
+            interval_records = self.global_stats.total_records - self._last_records
+            interval_bytes = self.global_stats.total_bytes - self._last_bytes
+            
+            interval_rps = interval_records / elapsed if elapsed > 0 else 0
+            interval_mbps = (interval_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+            
+            # Update tracking
+            self._last_records = self.global_stats.total_records
+            self._last_bytes = self.global_stats.total_bytes
+            self._last_report_time = time.time()
+            
+            total_elapsed = time.time() - self.global_stats.start_time
+            
+            logger.info(
+                f"[{total_elapsed:6.1f}s] "
+                f"Records: {self.global_stats.total_records:,} | "
+                f"Size: {self.global_stats.gb_written():.2f} GB | "
+                f"Throughput: {interval_mbps:.1f} MB/s | "
+                f"Rate: {interval_rps:,.0f} rec/s"
+            )
+    
+    def final_report(self):
+        """Print final summary statistics"""
+        self.collect_stats()
         
-        # Create filename with timestamp
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"transactions_{timestamp}.csv"
+        with self._lock:
+            total_elapsed = time.time() - self.global_stats.start_time
+            
+            logger.info("=" * 70)
+            logger.info("FINAL RESULTS - FlashBlade Stress Test Complete")
+            logger.info("=" * 70)
+            logger.info(f"Duration:        {total_elapsed:.1f} seconds")
+            logger.info(f"Total Records:   {self.global_stats.total_records:,}")
+            logger.info(f"Total Data:      {self.global_stats.gb_written():.2f} GB")
+            logger.info(f"Avg Throughput:  {self.global_stats.mb_per_second():.1f} MB/s")
+            logger.info(f"Avg Rate:        {self.global_stats.records_per_second():,.0f} records/s")
+            logger.info("=" * 70)
+
+
+class FlashBladeStressTester:
+    """Main orchestrator for the FlashBlade stress test"""
+    
+    def __init__(
+        self,
+        template_path: Path,
+        output_path: Path,
+        num_workers: int = 128,
+        duration_seconds: int = 300,
+        chunk_size: int = 10000
+    ):
+        self.template_path = template_path
+        self.output_path = output_path
+        self.num_workers = num_workers
+        self.duration_seconds = duration_seconds
+        self.chunk_size = chunk_size
         
-        # Save to FlashBlade
-        self.save_to_flashblade(transactions, filename)
+        self.stop_event = threading.Event()
+        self.stats_queue = queue.Queue()
+        self.schema: Optional[SchemaTemplate] = None
         
-        # Archive to S3
-        self.archive_to_s3(filename)
+        # Signal handling for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _signal_handler(self, signum, frame):
+        """Handle interrupt signals gracefully"""
+        logger.info(f"\nReceived signal {signum}, initiating graceful shutdown...")
+        self.stop_event.set()
+    
+    def setup(self):
+        """Initialize directories and load schema"""
+        logger.info("=" * 70)
+        logger.info("Pod 1: FlashBlade High-Performance Stress Test")
+        logger.info("=" * 70)
         
-        # Save metadata
-        metadata = {
-            'filename': filename,
-            'num_transactions': len(transactions),
-            'num_fraud': int(transactions['is_fraud'].sum()),
-            'fraud_rate': float(transactions['is_fraud'].mean()),
-            'date_range_start': transactions['timestamp'].min().isoformat(),
-            'date_range_end': transactions['timestamp'].max().isoformat(),
-            'generated_at': datetime.now().isoformat()
-        }
+        # Create output directory
+        self.output_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Output directory: {self.output_path}")
         
-        metadata_file = self.raw_data_path / f"metadata_{timestamp}.json"
-        pd.Series(metadata).to_json(metadata_file)
+        # Clear any existing files
+        existing_files = list(self.output_path.glob("thread_*_data.csv"))
+        if existing_files:
+            logger.info(f"Clearing {len(existing_files)} existing output files...")
+            for f in existing_files:
+                f.unlink()
         
-        logger.info("=" * 60)
-        logger.info("Pod 1: Data Gather Service - Complete")
-        logger.info(f"Output: {filename}")
-        logger.info("=" * 60)
+        # Load schema template
+        self.schema = SchemaTemplate(self.template_path)
         
-        return filename
+        logger.info(f"Workers:         {self.num_workers}")
+        logger.info(f"Chunk size:      {self.chunk_size:,} rows")
+        logger.info(f"Duration:        {self.duration_seconds} seconds")
+        logger.info("=" * 70)
+    
+    def run(self):
+        """Execute the stress test"""
+        self.setup()
+        
+        stats_aggregator = StatsAggregator(self.stats_queue)
+        workers = []
+        
+        logger.info(f"Starting {self.num_workers} worker threads...")
+        
+        # Start workers
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            # Submit all workers
+            futures = []
+            for worker_id in range(self.num_workers):
+                worker = WorkerThread(
+                    worker_id=worker_id,
+                    schema=self.schema,
+                    output_path=self.output_path,
+                    stats_queue=self.stats_queue,
+                    stop_event=self.stop_event,
+                    chunk_size=self.chunk_size
+                )
+                workers.append(worker)
+                futures.append(executor.submit(worker.run))
+            
+            logger.info(f"All {self.num_workers} workers started. Running for {self.duration_seconds}s...")
+            logger.info("-" * 70)
+            
+            # Monitor and report until duration expires
+            start_time = time.time()
+            while not self.stop_event.is_set():
+                elapsed = time.time() - start_time
+                
+                if elapsed >= self.duration_seconds:
+                    logger.info("\nDuration limit reached, stopping workers...")
+                    self.stop_event.set()
+                    break
+                
+                if stats_aggregator.should_report():
+                    stats_aggregator.report()
+                
+                time.sleep(0.5)  # Small sleep to avoid busy-waiting
+            
+            # Wait for all workers to finish
+            logger.info("Waiting for workers to complete...")
+            for future in futures:
+                future.result(timeout=10)
+        
+        # Final report
+        stats_aggregator.final_report()
+        
+        # List output files
+        output_files = list(self.output_path.glob("thread_*_data.csv"))
+        total_size = sum(f.stat().st_size for f in output_files)
+        logger.info(f"\nOutput files: {len(output_files)} files in {self.output_path}")
+        logger.info(f"Total on disk: {total_size / (1024**3):.2f} GB")
+
 
 def main():
     """Main entry point"""
-    # Get configuration from environment variables
-    fb_mount = os.getenv('FB_MOUNT', '/mnt/fsaai-shared/ebiser')
-    s3_bucket = os.getenv('S3_BUCKET')
-    num_transactions = int(os.getenv('NUM_TRANSACTIONS', '1000000'))
+    # Configuration from environment variables
+    template_dir = os.getenv('TEMPLATE_DIR', '/mnt/datasets/kaggle/creditcardfraud')
+    template_file = os.getenv('TEMPLATE_FILE', 'creditcard.csv')
+    output_dir = os.getenv('OUTPUT_DIR', '/mnt/fsaai-shared/ebiser/fraud-data')
+    num_workers = int(os.getenv('NUM_WORKERS', '128'))
+    duration_seconds = int(os.getenv('DURATION_SECONDS', '300'))  # 5 minutes default
+    chunk_size = int(os.getenv('CHUNK_SIZE', '10000'))
     
-    # Create generator and run
-    generator = TransactionDataGenerator(fb_mount, s3_bucket)
-    generator.run(num_transactions)
+    template_path = Path(template_dir) / template_file
+    output_path = Path(output_dir)
+    
+    logger.info("Configuration:")
+    logger.info(f"  Template: {template_path}")
+    logger.info(f"  Output:   {output_path}")
+    logger.info(f"  Workers:  {num_workers}")
+    logger.info(f"  Duration: {duration_seconds}s")
+    logger.info(f"  Chunk:    {chunk_size} rows")
+    
+    # Create and run stress tester
+    tester = FlashBladeStressTester(
+        template_path=template_path,
+        output_path=output_path,
+        num_workers=num_workers,
+        duration_seconds=duration_seconds,
+        chunk_size=chunk_size
+    )
+    
+    tester.run()
+
 
 if __name__ == "__main__":
     main()

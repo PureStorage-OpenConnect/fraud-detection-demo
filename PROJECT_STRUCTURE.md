@@ -16,10 +16,10 @@ nvidia-fraud-detection-pipeline/
 │
 ├── pods/                              # Microservice containers
 │   │
-│   ├── data-gather/                  # Pod 1: Data Generation
+│   ├── data-gather/                  # Pod 1: FlashBlade Stress Test
 │   │   ├── Dockerfile
-│   │   ├── gather.py                 # Transaction data generator
-│   │   └── requirements.txt
+│   │   ├── gather.py                 # High-performance parallel generator
+│   │   └── requirements.txt          # pandas, numpy
 │   │
 │   ├── data-prep/                    # Pod 2: Feature Engineering (GPU)
 │   │   ├── Dockerfile
@@ -47,12 +47,25 @@ nvidia-fraud-detection-pipeline/
 
 ## Storage Structure
 
-### FlashBlade (FB) - Parallel I/O
+### Template Input (Read-Only)
+```
+/mnt/datasets/kaggle/creditcardfraud/
+└── creditcard.csv                    # Kaggle schema template (284,807 rows)
+```
+
+### FlashBlade Output - Pod 1 (High-Throughput Parallel Write)
+```
+/mnt/fsaai-shared/ebiser/fraud-data/
+├── thread_000_data.csv               # Worker 0 output
+├── thread_001_data.csv               # Worker 1 output
+├── thread_002_data.csv               # Worker 2 output
+├── ...
+└── thread_127_data.csv               # Worker 127 output
+```
+
+### FlashBlade Features - Pod 2 (Parallel I/O)
 ```
 /mnt/fsaai-shared/ebiser/
-├── raw_data/
-│   ├── transactions_YYYYMMDD_HHMMSS.csv
-│   └── metadata_YYYYMMDD_HHMMSS.json
 └── prep_output/
     ├── features_YYYYMMDD_HHMMSS.parquet
     └── graph_edges_YYYYMMDD_HHMMSS.csv
@@ -75,8 +88,6 @@ nvidia-fraud-detection-pipeline/
 ### S3 - Archival & Versioning
 ```
 s3://fraud-detection-bucket/
-├── raw_archives/
-│   └── transactions_YYYYMMDD_HHMMSS.csv
 └── model_versions/
     ├── fraud_xgboost_vYYYYMMDD_HHMMSS.tar.gz
     └── fraud_gnn_vYYYYMMDD_HHMMSS.tar.gz
@@ -91,12 +102,17 @@ s3://fraud-detection-bucket/
 - **.env**: Local environment configuration with actual credentials (NOT in git)
 - **.env.example**: Template showing required environment variables
 - **.gitignore**: Git exclusion rules to protect secrets and build artifacts
-- **docker-compose.yaml**: Orchestrates all 5 pods with GPU allocation
+- **docker-compose.yaml**: Orchestrates all 5 pods with storage mounts
 - **Makefile**: Convenience commands for build/run operations
 
-### Pod 1: Data Gather
-- **gather.py**: Generates synthetic transaction data with fraud labels
-- **Dockerfile**: Python 3.10 slim with pandas, numpy, boto3
+### Pod 1: Data Gather (FlashBlade Stress Test)
+- **gather.py**: High-performance parallel data generator
+  - 128 worker threads writing simultaneously
+  - Schema-based generation from Kaggle template
+  - Continuous append mode for sustained I/O
+  - Real-time throughput monitoring
+- **Dockerfile**: Python 3.11 slim with pandas, numpy
+- **requirements.txt**: pandas>=2.1.0, numpy>=1.26.0
 
 ### Pod 2: Data Prep
 - **prep.py**: GPU-accelerated feature engineering with RAPIDS
@@ -117,6 +133,38 @@ s3://fraud-detection-bucket/
 ### Scripts
 - **build_all.sh**: Automated build script for all containers
 
+## Environment Variables
+
+### Pod 1 Configuration
+```bash
+# Template source
+TEMPLATE_MOUNT=/mnt/datasets/kaggle/creditcardfraud
+TEMPLATE_DIR=/mnt/datasets/kaggle/creditcardfraud
+TEMPLATE_FILE=creditcard.csv
+
+# Output destination
+FB_OUTPUT_MOUNT=/mnt/fsaai-shared/ebiser/fraud-data
+OUTPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
+
+# Performance tuning
+NUM_WORKERS=128          # Parallel worker threads
+DURATION_SECONDS=300     # Test duration (5 minutes)
+CHUNK_SIZE=10000         # Rows per write operation
+```
+
+### General Configuration
+```bash
+# Storage paths
+FB_MOUNT=/mnt/fsaai-shared/ebiser
+FA_MOUNT=~/ebiser/nvidia.financial.fraud.detection
+
+# S3 (optional)
+S3_ENDPOINT=https://fb-array.example.com
+S3_ACCESS_KEY=your-access-key
+S3_SECRET_KEY=your-secret-key
+S3_BUCKET=fraud-detection-bucket
+```
+
 ## Quick Start
 
 ```bash
@@ -126,19 +174,22 @@ cd nvidia-fraud-detection-pipeline
 
 # 2. Configure environment
 cp .env.example .env
-# Edit .env with your storage paths and S3 credentials
+# Edit .env with your storage paths
 
-# 3. Build all containers
+# 3. Ensure Kaggle dataset is available
+ls /mnt/datasets/kaggle/creditcardfraud/creditcard.csv
+
+# 4. Build all containers
 make build
 
-# 4. Start pipeline
+# 5. Run FlashBlade stress test
+docker-compose up data-gather
+
+# 6. Monitor throughput
+docker-compose logs -f data-gather
+
+# 7. Run full pipeline
 make up
-
-# 5. Monitor logs
-make logs
-
-# 6. Test services
-make test
 ```
 
 ## Development Workflow
@@ -146,13 +197,16 @@ make test
 ### Running Individual Pods
 
 ```bash
-# Run data generation only
+# Run FlashBlade stress test only
 docker-compose up data-gather
 
-# Run data preparation (requires data-gather output)
+# Custom stress test configuration
+NUM_WORKERS=256 DURATION_SECONDS=600 docker-compose up data-gather
+
+# Run data preparation (requires generated data)
 docker-compose up data-prep
 
-# Run model training (requires data-prep output)
+# Run model training (requires prepared features)
 docker-compose up model-build
 
 # Start inference and notification services
@@ -163,20 +217,41 @@ docker-compose up inference notification
 
 ```bash
 # View logs for specific pod
-docker-compose logs -f data-prep
+docker-compose logs -f data-gather
 
 # Execute shell in running container
-docker exec -it fraud-detection-prep bash
+docker exec -it fraud-detection-gather bash
 
-# Check GPU allocation
-docker exec -it fraud-detection-prep nvidia-smi
+# Check output files
+ls -la /mnt/fsaai-shared/ebiser/fraud-data/
+
+# Monitor disk I/O during stress test
+iostat -x 1
+```
+
+## Pod 1 Output Format
+
+Each worker generates CSV files with the Kaggle creditcard.csv schema:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| Time | float64 | Seconds elapsed (0-172800) |
+| V1-V28 | float64 | PCA-transformed features |
+| Amount | float64 | Transaction amount |
+| Class | int64 | Fraud label (0=normal, 1=fraud) |
+
+Example output:
+```csv
+Time,V1,V2,...,V28,Amount,Class
+45623.5,-1.359,-0.072,...,0.015,149.62,0
+45624.1,1.191,0.266,...,-0.189,2.69,0
 ```
 
 ## Next Steps
 
-1. Review and test each Python script with your data
-2. Adjust hyperparameters in training scripts
-3. Customize Triton inference configurations
-4. Add monitoring and alerting integrations
-5. Implement production security measures
-6. Set up CI/CD pipeline
+1. Download Kaggle creditcard.csv to template directory
+2. Run Pod 1 stress test to verify FlashBlade throughput
+3. Review generated data schema compatibility
+4. Adjust Pod 2 to read from `/fraud-data/` output
+5. Train models and deploy to Triton
+6. Set up monitoring dashboards for production

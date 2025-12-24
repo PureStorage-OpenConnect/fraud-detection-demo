@@ -1,20 +1,38 @@
 version: '3.8'
 
 services:
-  # Pod 1: Data Gather
+  # Pod 1: Data Gather - High-Performance FlashBlade Stress Test
   data-gather:
     build: ./pods/data-gather
     container_name: fraud-detection-gather
     volumes:
-      - ${FB_MOUNT:-/mnt/fsaai-shared/ebiser}:/mnt/fsaai-shared/ebiser
-      - fa-storage:/root/ebiser/nvidia.financial.fraud.detection
+      # Input: Kaggle creditcard.csv template (read-only)
+      - ${TEMPLATE_MOUNT:-/mnt/datasets/kaggle/creditcardfraud}:/mnt/datasets/kaggle/creditcardfraud:ro
+      # Output: FlashBlade high-throughput storage (read/write)
+      - ${FB_OUTPUT_MOUNT:-/mnt/fsaai-shared/ebiser/fraud-data}:/mnt/fsaai-shared/ebiser/fraud-data
     environment:
-      - FB_MOUNT=/mnt/fsaai-shared/ebiser
-      - S3_ENDPOINT=${S3_ENDPOINT}
-      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
-      - S3_SECRET_KEY=${S3_SECRET_KEY}
-      - S3_BUCKET=${S3_BUCKET}
-      - NUM_TRANSACTIONS=${NUM_TRANSACTIONS:-1000000}
+      # Template configuration
+      - TEMPLATE_DIR=/mnt/datasets/kaggle/creditcardfraud
+      - TEMPLATE_FILE=creditcard.csv
+      # Output configuration
+      - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
+      # Performance tuning
+      - NUM_WORKERS=${NUM_WORKERS:-128}
+      - DURATION_SECONDS=${DURATION_SECONDS:-300}
+      - CHUNK_SIZE=${CHUNK_SIZE:-10000}
+    # Resource allocation for high-thread workloads
+    deploy:
+      resources:
+        limits:
+          cpus: '32'
+          memory: 64G
+        reservations:
+          cpus: '16'
+          memory: 32G
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     networks:
       - fraud-detection
 
@@ -23,10 +41,12 @@ services:
     build: ./pods/data-prep
     container_name: fraud-detection-prep
     volumes:
+      - ${FB_OUTPUT_MOUNT:-/mnt/fsaai-shared/ebiser/fraud-data}:/mnt/fsaai-shared/ebiser/fraud-data
       - ${FB_MOUNT:-/mnt/fsaai-shared/ebiser}:/mnt/fsaai-shared/ebiser
       - fa-storage:/root/ebiser/nvidia.financial.fraud.detection
     environment:
       - FB_MOUNT=/mnt/fsaai-shared/ebiser
+      - INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
       - INPUT_FILE=${INPUT_FILE}
     deploy:
       resources:

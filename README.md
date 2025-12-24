@@ -10,6 +10,8 @@
 
 A containerized fraud detection pipeline optimized for dual NVIDIA L40S GPUs. This project re-architects the NVIDIA Financial Fraud Detection AI Blueprint into 5 independent Docker containers that work together to process transactions, train models, and detect fraud in real-time.
 
+**Pod 1** serves as a high-performance stress-testing tool for Pure Storage FlashBlade, generating massive synthetic transaction data using 128 parallel workers.
+
 **Original Blueprint**: [NVIDIA Financial Fraud Detection](https://github.com/NVIDIA-AI-Blueprints/Financial-Fraud-Detection)
 
 ---
@@ -18,13 +20,18 @@ A containerized fraud detection pipeline optimized for dual NVIDIA L40S GPUs. Th
 
 ```mermaid
 graph TB
-    A[Pod 1<br/>Data Gather] -->|CSV| C[Pod 2<br/>Data Prep]
+    subgraph "Data Sources"
+        KAGGLE[Kaggle creditcard.csv<br/>/mnt/datasets/kaggle/creditcardfraud]
+    end
+    
+    A[Pod 1<br/>Data Gather<br/>128 Parallel Workers] -->|Parallel CSV Writes| FB_OUT
+    KAGGLE -.->|Schema Template| A
+    
+    FB_OUT[FlashBlade Output<br/>/mnt/fsaai-shared/ebiser/fraud-data] --> C[Pod 2<br/>Data Prep]
     C -->|Features| D[Pod 3<br/>Model Build]
     D -->|Models| E[Pod 4<br/>Inference]
     E -->|Alerts| F[Pod 5<br/>Notification]
     
-    A -.->|Write Raw Data| FB
-    A -.->|Archive| S3
     C -.->|Read/Write Features| FB
     D -.->|Read Training Data| FB
     D -.->|Write Models| FA
@@ -32,7 +39,9 @@ graph TB
     E -.->|Load Models| FA
     FB <-.->|Integrated| S3
     
-    style A fill:#1a5490,stroke:#333,stroke-width:2px,color:#fff
+    style A fill:#76B900,stroke:#333,stroke-width:2px,color:#fff
+    style KAGGLE fill:#1a5490,stroke:#333,stroke-width:2px,color:#fff
+    style FB_OUT fill:#FF6600,stroke:#333,stroke-width:2px,color:#fff
     style C fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style D fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style E fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
@@ -48,53 +57,46 @@ graph TB
 
 | Pod | Container | GPU | Storage | Purpose |
 |-----|-----------|-----|---------|---------|
-| 1 | `data-gather` | No | FB + S3 | Generate/ingest raw transaction data |
+| 1 | `data-gather` | No | Template (RO) + FB (RW) | **FlashBlade stress test**: 128 parallel workers generating synthetic transactions from Kaggle schema |
 | 2 | `data-prep` | 2x L40S | FB | GPU-accelerated feature engineering (RAPIDS) |
 | 3 | `model-build` | 2x L40S | FB + FA + S3 | Train GNN and XGBoost models |
 | 4 | `inference` | 2x L40S | FA | Real-time fraud detection (Triton Server) |
 | 5 | `notification` | No | None | Handle fraud alerts via webhook |
 
-**Data Flow**: Raw data (FB) → Prepared features (FB) → Trained models (FA) → Real-time predictions → Alerts
+**Data Flow**: Template Schema (Kaggle) → Parallel Generation (Pod 1) → FlashBlade → Feature Engineering (Pod 2) → Models (FA) → Predictions → Alerts
 
 **Storage Strategy**:
 
-This architecture leverages Pure Storage's dual-protocol approach with optimized storage placement for different workload characteristics:
+### Input Template (Read-Only)
+- **Path**: `/mnt/datasets/kaggle/creditcardfraud/creditcard.csv`
+- **Purpose**: Schema template for synthetic data generation
+- **Usage**: Pod 1 reads column structure and data distributions
 
-### File Storage (NFS Mounts)
-- **FA**: `/root/ebiser/nvidia.financial.fraud.detection`
-  - **Protocol**: NFS file mount
-  - **Optimized for**: Low-latency random I/O (<1ms read latency)
-  - **Use case**: Real-time model serving where inference requests require immediate model access
-  - **Pods**: Pod 3 (writes models), Pod 4 (reads models for serving)
-  
-- **FB**: `/mnt/fsaai-shared/ebiser`
-  - **Protocol**: NFS file mount
-  - **Optimized for**: High-throughput parallel I/O (>5GB/s)
-  - **Use case**: Bulk data processing where multiple GPU workers read/write large datasets simultaneously
-  - **Pods**: Pod 1 (writes raw data), Pod 2 (reads/writes features), Pod 3 (reads training data)
+### FlashBlade Output (High-Throughput Write)
+- **Path**: `/mnt/fsaai-shared/ebiser/fraud-data`
+- **Protocol**: NFS file mount
+- **Optimized for**: Sustained parallel write I/O from 128 workers
+- **Use case**: Stress testing FlashBlade with continuous append operations
+- **Pods**: Pod 1 (writes), Pod 2 (reads)
 
-### Object Storage (S3 Protocol)
-- **FB S3 Endpoint**: `s3://fraud-detection-bucket`
-  - **Protocol**: S3 API on FlashBlade
-  - **Optimized for**: Archival, versioning, and cross-region access
-  - **Use case**: Long-term storage of raw data archives and model versions for compliance and rollback
-  - **Pods**: Pod 1 (archives raw data), Pod 3 (versions trained models)
+### FlashBlade Features (Parallel I/O)
+- **Path**: `/mnt/fsaai-shared/ebiser`
+- **Protocol**: NFS file mount
+- **Optimized for**: High-throughput parallel I/O (>5GB/s)
+- **Use case**: Bulk data processing with multiple GPU workers
+- **Pods**: Pod 2 (reads/writes features), Pod 3 (reads training data)
 
-**Mount Configuration**:
-```bash
-# FlashArray (FA) - Low Latency NFS Mount
-mount -t nfs fa-array.example.com:/volume/fraud-models \
-  ~/ebiser/nvidia.financial.fraud.detection
+### FlashArray (Low-Latency)
+- **Path**: `~/ebiser/nvidia.financial.fraud.detection`
+- **Protocol**: NFS file mount
+- **Optimized for**: Low-latency random I/O (<1ms read latency)
+- **Use case**: Real-time model serving
+- **Pods**: Pod 3 (writes models), Pod 4 (reads models)
 
-# FlashBlade (FB) - High Throughput NFS Mount  
-mount -t nfs fb-array.example.com:/export/fraud-data \
-  /mnt/fsaai-shared/ebiser
-
-# FlashBlade S3 - Configure endpoint in .env
-S3_ENDPOINT=https://fb-array.example.com
-```
-
-This separation ensures that high-throughput ETL operations (data prep, feature engineering) don't interfere with latency-sensitive inference serving, while S3 provides durable archival storage.
+### S3 Object Storage (Archival)
+- **Endpoint**: `s3://fraud-detection-bucket`
+- **Protocol**: S3 API on FlashBlade
+- **Use case**: Model versioning and long-term archival
 
 ---
 
@@ -108,7 +110,6 @@ This separation ensures that high-throughput ETL operations (data prep, feature 
 - **Storage**: 
   - **FA (FlashArray X70R3)**: Low-latency file storage
   - **FB (FlashBlade S200)**: Parallel I/O, file + S3 protocol
-  - **S3**: Object storage for archival and versioning
 
 ---
 
@@ -130,6 +131,10 @@ This separation ensures that high-throughput ETL operations (data prep, feature 
 - Docker Compose >= 2.x
 - NVIDIA Container Toolkit
 
+# Required Data
+- Kaggle Credit Card Fraud Dataset: creditcard.csv
+  Download from: https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud
+
 # Verify GPU access
 nvidia-smi
 docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
@@ -143,12 +148,18 @@ git clone https://github.com/yourusername/nvidia-fraud-detection-pipeline.git
 cd nvidia-fraud-detection-pipeline
 
 # Configure storage mount points
-export FA_MOUNT=~/ebiser/nvidia.financial.fraud.detection
+export TEMPLATE_MOUNT=/mnt/datasets/kaggle/creditcardfraud
+export FB_OUTPUT_MOUNT=/mnt/fsaai-shared/ebiser/fraud-data
 export FB_MOUNT=/mnt/fsaai-shared/ebiser
+export FA_MOUNT=~/ebiser/nvidia.financial.fraud.detection
 
 # Create required directories
+mkdir -p $FB_OUTPUT_MOUNT
 mkdir -p $FB_MOUNT/{raw_data,prep_output}
 mkdir -p $FA_MOUNT/model_repository
+
+# Ensure Kaggle dataset is available
+ls $TEMPLATE_MOUNT/creditcard.csv
 
 # Build all containers
 docker-compose build
@@ -156,6 +167,76 @@ docker-compose build
 # Start the pipeline
 docker-compose up
 ```
+
+---
+
+## Data Generation Demo
+
+Pod 1 (`data-gather`) is designed as a **FlashBlade stress-testing tool** that demonstrates Pure Storage's high-throughput capabilities.
+
+### How It Works
+
+1. **Schema Loading**: Reads `creditcard.csv` to extract column structure and statistical distributions
+2. **Parallel Generation**: Spawns 128 worker threads, each writing to a dedicated file
+3. **Continuous Append**: Workers generate and append 10,000-row chunks continuously
+4. **Real-Time Metrics**: Prints throughput statistics every 5 seconds
+
+### Running the Stress Test
+
+```bash
+# Run with default settings (5 minutes, 128 workers)
+docker-compose up data-gather
+
+# Custom configuration
+NUM_WORKERS=256 DURATION_SECONDS=600 docker-compose up data-gather
+
+# Quick test (1 minute, 64 workers)
+NUM_WORKERS=64 DURATION_SECONDS=60 docker-compose up data-gather
+```
+
+### Interpreting Throughput Metrics
+
+The console output shows real-time performance:
+
+```
+[  30.0s] Records: 12,500,000 | Size: 2.45 GB | Throughput: 850.2 MB/s | Rate: 425,000 rec/s
+[  35.0s] Records: 14,750,000 | Size: 2.89 GB | Throughput: 892.1 MB/s | Rate: 450,000 rec/s
+```
+
+| Metric | Description | Target |
+|--------|-------------|--------|
+| **Records** | Total synthetic transactions generated | Continuous growth |
+| **Size** | Total data written to FlashBlade | 10+ GB in 5 min |
+| **Throughput** | Current write speed (MB/s) | >500 MB/s |
+| **Rate** | Records generated per second | >100,000 rec/s |
+
+### Performance Tuning
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `NUM_WORKERS` | 128 | Parallel worker threads |
+| `DURATION_SECONDS` | 300 | Test duration (5 minutes) |
+| `CHUNK_SIZE` | 10000 | Rows per write operation |
+
+**Tips for Maximum Throughput:**
+- Increase `NUM_WORKERS` if CPU utilization is low
+- Increase `CHUNK_SIZE` for fewer, larger I/O operations
+- Monitor FlashBlade metrics during the test
+- Ensure network bandwidth is not the bottleneck
+
+### Output Files
+
+After the test completes, you'll find:
+
+```bash
+/mnt/fsaai-shared/ebiser/fraud-data/
+├── thread_000_data.csv
+├── thread_001_data.csv
+├── ...
+└── thread_127_data.csv
+```
+
+Each file contains synthetic credit card transactions matching the Kaggle dataset schema (V1-V28 features, Time, Amount, Class).
 
 ---
 
@@ -167,7 +248,8 @@ nvidia-fraud-detection-pipeline/
 ├── pods/
 │   ├── data-gather/
 │   │   ├── Dockerfile
-│   │   └── gather.py
+│   │   ├── gather.py            # High-performance parallel generator
+│   │   └── requirements.txt
 │   ├── data-prep/
 │   │   ├── Dockerfile
 │   │   └── prep.py
@@ -182,18 +264,24 @@ nvidia-fraud-detection-pipeline/
 │       └── app.py
 └── README.md
 
-# Storage Mounts (Pure Storage)
+# Storage Mounts
+Template (RO): /mnt/datasets/kaggle/creditcardfraud/
+    └── creditcard.csv                 # Schema template
+
+FB Output: /mnt/fsaai-shared/ebiser/fraud-data/
+    ├── thread_000_data.csv            # Pod 1 parallel output
+    ├── thread_001_data.csv
+    └── ...
+
+FB: /mnt/fsaai-shared/ebiser/
+    └── prep_output/                   # Pod 2 feature output
+
 FA: ~/ebiser/nvidia.financial.fraud.detection/
     └── model_repository/              # Low-latency model storage
         ├── fraud_gnn/
         └── fraud_xgboost/
 
-FB: /mnt/fsaai-shared/ebiser/
-    ├── raw_data/                      # High-throughput data ingestion
-    └── prep_output/                   # Parallel feature processing
-
 S3: s3://fraud-detection-bucket/       # Archival and versioning
-    ├── raw_archives/
     └── model_versions/
 ```
 
@@ -219,7 +307,7 @@ docker-compose logs -f
 ### Run Individual Pods
 
 ```bash
-# Pod 1: Generate data
+# Pod 1: FlashBlade stress test (data generation)
 docker-compose up data-gather
 
 # Pod 2: Prepare features (requires data from Pod 1)
@@ -247,70 +335,11 @@ curl -X POST http://localhost:8000/v2/models/fraud_xgboost/infer \
   -d '{
     "inputs": [{
       "name": "input__0",
-      "shape": [1, 50],
-      "datatype": "TYPE_FP32",
-      "data": [0.5, 0.3, 0.8, ...]
+      "shape": [1, 30],
+      "datatype": "FP32",
+      "data": [0.0, -1.359, -0.072, ..., 149.62]
     }]
   }'
-```
-
----
-
-## Docker Compose Configuration
-
-```yaml
-version: '3.8'
-
-services:
-  data-gather:
-    build: ./pods/1-data-gather
-    volumes:
-      - ./data:/data
-    
-  data-prep:
-    build: ./pods/2-data-prep
-    volumes:
-      - ./data:/data
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 2
-              capabilities: [gpu]
-    
-  model-build:
-    build: ./pods/3-model-build
-    volumes:
-      - ./data:/data
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 2
-              capabilities: [gpu]
-    
-  inference:
-    build: ./pods/4-inference
-    ports:
-      - "8000:8000"  # HTTP
-      - "8001:8001"  # gRPC
-      - "8002:8002"  # Metrics
-    volumes:
-      - ./data:/data
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 2
-              capabilities: [gpu]
-    
-  notification:
-    build: ./pods/5-notification
-    ports:
-      - "5000:5000"
 ```
 
 ---
@@ -319,7 +348,22 @@ services:
 
 ### Storage Paths
 
-**FlashArray (FA) - Low Latency:**
+**Template Input (Read-Only):**
+```bash
+/mnt/datasets/kaggle/creditcardfraud/
+└── creditcard.csv                    # Kaggle schema template
+```
+
+**FlashBlade Output (High-Throughput):**
+```bash
+/mnt/fsaai-shared/ebiser/fraud-data/
+├── thread_000_data.csv               # Pod 1 worker outputs
+├── thread_001_data.csv
+├── ...
+└── thread_127_data.csv
+```
+
+**FlashArray (Low Latency):**
 ```bash
 ~/ebiser/nvidia.financial.fraud.detection/
 └── model_repository/
@@ -331,46 +375,28 @@ services:
         └── 1/model.json              # Pod 3 writes, Pod 4 reads
 ```
 
-**FlashBlade (FB) - Parallel I/O:**
-```bash
-/mnt/fsaai-shared/ebiser/
-├── raw_data/
-│   └── transactions.csv              # Pod 1 writes
-└── prep_output/
-    ├── features.parquet              # Pod 2 writes, Pod 3 reads
-    ├── graph_nodes.csv
-    └── graph_edges.csv
-```
-
-**S3 - Archival & Versioning:**
-```bash
-s3://fraud-detection-bucket/
-├── raw_archives/
-│   └── transactions_2024-12-01.csv   # Pod 1 archives
-└── model_versions/
-    ├── fraud_gnn_v1.0.tar.gz         # Pod 3 versions
-    └── fraud_xgboost_v1.0.tar.gz
-```
-
 ### Pipeline Flow
 
-1. **Pod 1** generates synthetic transactions → **FB** `/raw_data/` + **S3** archive
-2. **Pod 2** reads from **FB**, processes with RAPIDS → **FB** `/prep_output/`
-3. **Pod 3** reads features from **FB**, trains models → **FA** `/model_repository/` + **FB** **S3** versions
-4. **Pod 4** loads models from **FA**, serves predictions via Triton
-5. **Pod 5** receives alerts from Pod 4 when fraud detected
+1. **Pod 1** reads schema from `/mnt/datasets/kaggle/creditcardfraud/creditcard.csv`
+2. **Pod 1** spawns 128 workers (default) → writes parallel CSV files to **FlashBlade** `/fraud-data/`
+3. **Pod 2** reads generated data, processes with RAPIDS → **FlashBlade** `/prep_output/`
+4. **Pod 3** reads features from **FlashBlade**, trains models → **FlashArray** `/model_repository/`
+5. **Pod 4** loads models from **FlashArray**, serves predictions via Triton
+6. **Pod 5** receives alerts from Pod 4 when fraud detected
 
 ---
 
 ## Monitoring
 
 ```bash
-# Check GPU usage
+# Watch data generation throughput (Pod 1 logs)
+docker-compose logs -f data-gather
+
+# Check GPU usage (Pods 2, 3, 4)
 watch -n 1 nvidia-smi
 
 # View container logs
 docker-compose logs -f data-prep
-docker-compose logs -f inference
 
 # Check Triton metrics
 curl http://localhost:8002/metrics
@@ -378,17 +404,32 @@ curl http://localhost:8002/metrics
 # Monitor resource usage
 docker stats
 
-# Check storage I/O performance
-# FlashBlade throughput
-iostat -x 1 /mnt/fsaai-shared/ebiser
+# Check FlashBlade I/O during stress test
+iostat -x 1 /mnt/fsaai-shared/ebiser/fraud-data
 
-# FlashArray latency
+# Check FlashArray latency
 iostat -x 1 ~/ebiser/nvidia.financial.fraud.detection
 ```
 
 ---
 
 ## Troubleshooting
+
+### Pod 1: Data generation not reaching expected throughput
+
+```bash
+# Check worker count
+docker-compose logs data-gather | grep "workers started"
+
+# Verify template file exists
+ls -la /mnt/datasets/kaggle/creditcardfraud/creditcard.csv
+
+# Check output directory permissions
+ls -la /mnt/fsaai-shared/ebiser/fraud-data/
+
+# Increase file descriptor limits if seeing "Too many open files"
+ulimit -n 65536
+```
 
 ### GPU not detected
 
@@ -411,12 +452,9 @@ docker-compose logs <service-name>
 docker-compose build --no-cache <service-name>
 
 # Verify storage mounts
+ls -la /mnt/datasets/kaggle/creditcardfraud/
+ls -la /mnt/fsaai-shared/ebiser/fraud-data/
 ls -la ~/ebiser/nvidia.financial.fraud.detection/
-ls -la /mnt/fsaai-shared/ebiser/
-
-# Check mount permissions
-sudo chmod -R 755 ~/ebiser/nvidia.financial.fraud.detection/
-sudo chmod -R 755 /mnt/fsaai-shared/ebiser/
 ```
 
 ### Out of GPU memory
@@ -435,16 +473,15 @@ docker-compose down
 
 ## Performance Targets
 
-> **Note**: These are initial performance targets and will be updated as the project matures and undergoes testing.
-
 | Metric | Target | Storage Component |
 |--------|--------|-------------------|
-| Data Prep Throughput | > 1M records/sec | FB Parallel I/O |
-| Model Training Time | < 30 minutes | FB read, FA write |
-| Inference Latency (p99) | < 10ms | FA low-latency reads |
-| GPU Utilization | > 85% | Pods 2, 3, 4 |
-| Storage Write Speed (FB) | > 5 GB/s | Pod 1, Pod 2 |
-| Storage Read Latency (FA) | < 1ms | Pod 4 |
+| **Data Generation (Pod 1)** | >500 MB/s | FlashBlade Parallel Write |
+| **Data Generation Records** | >100,000 rec/s | FlashBlade Parallel Write |
+| Data Prep Throughput | >1M records/sec | FB Parallel I/O |
+| Model Training Time | <30 minutes | FB read, FA write |
+| Inference Latency (p99) | <10ms | FA low-latency reads |
+| GPU Utilization | >85% | Pods 2, 3, 4 |
+| Storage Read Latency (FA) | <1ms | Pod 4 |
 
 ---
 
@@ -461,13 +498,3 @@ docker-compose down
 ## License
 
 Apache License 2.0 - see [LICENSE](LICENSE) file
-
----
-
-## Contact
-
-**Repository**: [https://github.com/yourusername/nvidia-fraud-detection-pipeline](https://github.com/yourusername/nvidia-fraud-detection-pipeline)
-
----
-
-**Built for High-Performance Fraud Detection with Docker & NVIDIA L40S GPUs**
