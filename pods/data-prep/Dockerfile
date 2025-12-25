@@ -1,4 +1,10 @@
 # Pod 2: Data Prep - RAPIDS Accelerator for Spark
+#
+# NGC Authentication required before build:
+#   docker login nvcr.io -u '$oauthtoken' -p <NGC_API_KEY>
+#
+# Get your API key from: https://ngc.nvidia.com/setup/api-key
+#
 FROM nvcr.io/nvidia/spark:3.5.0-py3
 
 LABEL description="GPU-accelerated ETL using RAPIDS Accelerator for Apache Spark"
