@@ -1,23 +1,41 @@
-# Pod 2: Data Prep - RAPIDS Accelerator for Spark
-FROM apache/spark:3.5.0-python3
+# Pod 2: Data Prep - Spark with RAPIDS Accelerator on CUDA
+# Based on NVIDIA's recommended approach for GPU-accelerated Spark
+FROM nvidia/cuda:12.2.2-runtime-ubuntu22.04
 
-USER root
+LABEL description="GPU-accelerated Spark ETL using RAPIDS Accelerator"
 
-LABEL description="GPU-accelerated ETL using RAPIDS Accelerator for Apache Spark"
+# Versions
+ENV SPARK_VERSION=3.5.0
+ENV HADOOP_VERSION=3
+ENV RAPIDS_VERSION=24.02.0
+ENV JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+
+# Install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    openjdk-11-jdk-headless \
+    python3 \
+    python3-pip \
+    wget \
+    procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/bin/python3 /usr/bin/python
+
+# Install Spark
+RUN wget -q https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz \
+    && tar -xzf spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz -C /opt \
+    && mv /opt/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION} /opt/spark \
+    && rm spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz
 
 ENV SPARK_HOME=/opt/spark
+ENV PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin
 
-# Install wget
-RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
-
-# Download RAPIDS Accelerator JAR (includes cudf dependency)
-RUN mkdir -p ${SPARK_HOME}/jars/rapids && \
-    cd ${SPARK_HOME}/jars/rapids && \
-    wget https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/24.02.0/rapids-4-spark_2.12-24.02.0.jar
+# Download RAPIDS Accelerator JAR
+RUN wget -q https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/${RAPIDS_VERSION}/rapids-4-spark_2.12-${RAPIDS_VERSION}.jar \
+    -P ${SPARK_HOME}/jars/
 
 # Python dependencies
 COPY requirements.txt /tmp/
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 # Application
 COPY prepare.py /app/
@@ -42,5 +60,4 @@ ENTRYPOINT ["spark-submit", \
     "--conf", "spark.rapids.sql.format.parquet.read.enabled=true", \
     "--conf", "spark.rapids.sql.format.parquet.write.enabled=true", \
     "--conf", "spark.sql.adaptive.enabled=true", \
-    "--jars", "/opt/spark/jars/rapids/rapids-4-spark_2.12-24.02.0.jar", \
     "/app/prepare.py"]

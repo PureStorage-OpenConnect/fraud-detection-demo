@@ -49,12 +49,10 @@ class PrepConfig:
     """Configuration for data preparation service"""
     input_dir: str
     output_dir: str
-    poll_interval: int = 5  # Reduced for faster demo response
+    poll_interval: int = 5
     batch_mode: bool = False
-    num_gpus: int = 2
-    gpu_memory_fraction: float = 0.8
-    enable_gds: bool = True
-    coalesce_output: int = 8  # Number of output partitions
+    num_gpus: int = 2  # L40S GPUs
+    coalesce_output: int = 8
 
 
 def signal_handler(signum, frame):
@@ -66,20 +64,10 @@ def signal_handler(signum, frame):
 
 def create_spark_session(config: PrepConfig) -> SparkSession:
     """
-    Create Spark session with NVIDIA RAPIDS Accelerator configuration.
-    
-    Key RAPIDS settings:
-    - spark.plugins: Enable SQL plugin for GPU acceleration
-    - spark.rapids.sql.enabled: Master switch for GPU SQL operations
-    - spark.rapids.memory.pinnedPool.size: Pinned memory for GPU transfers
-    - spark.rapids.sql.concurrentGpuTasks: Concurrent GPU operations
+    Create Spark session with NVIDIA RAPIDS Accelerator.
+    GPU acceleration enabled via spark.plugins=com.nvidia.spark.SQLPlugin
     """
     logger.info("Initializing Spark session with RAPIDS Accelerator...")
-    
-    # Calculate memory settings based on available GPUs
-    executor_memory = "32g"
-    driver_memory = "16g"
-    pinned_pool_size = "4g"
     
     builder = SparkSession.builder \
         .appName("FraudDetection-DataPrep-RAPIDS") \
@@ -87,52 +75,31 @@ def create_spark_session(config: PrepConfig) -> SparkSession:
     
     # Core Spark configuration
     builder = builder \
-        .config("spark.driver.memory", driver_memory) \
-        .config("spark.executor.memory", executor_memory) \
+        .config("spark.driver.memory", "16g") \
         .config("spark.sql.adaptive.enabled", "true") \
         .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
         .config("spark.sql.parquet.compression.codec", "snappy") \
-        .config("spark.sql.parquet.enableVectorizedReader", "true")
+        .config("spark.sql.files.maxPartitionBytes", "512m")
     
     # RAPIDS Accelerator configuration
-    builder = builder \
-        .config("spark.plugins", "com.nvidia.spark.SQLPlugin") \
-        .config("spark.rapids.sql.enabled", "true") \
-        .config("spark.rapids.memory.pinnedPool.size", pinned_pool_size) \
-        .config("spark.rapids.sql.concurrentGpuTasks", "2") \
-        .config("spark.rapids.sql.variableFloatAgg.enabled", "true") \
-        .config("spark.rapids.sql.explain", "NOT_ON_GPU") \
-        .config("spark.rapids.sql.incompatibleOps.enabled", "true")
-    
-    # GPU resource configuration
-    builder = builder \
-        .config("spark.executor.resource.gpu.amount", str(config.num_gpus)) \
-        .config("spark.task.resource.gpu.amount", "0.5") \
-        .config("spark.rapids.sql.batchSizeBytes", "512m")
-    
-    # GPUDirect Storage configuration (if enabled)
-    if config.enable_gds:
+    if config.num_gpus > 0:
         builder = builder \
-            .config("spark.rapids.memory.gpu.direct.storage.spill.enabled", "true") \
-            .config("spark.rapids.shuffle.mode", "UCX") \
-            .config("spark.rapids.shuffle.transport.ucxMgr.useWakeup", "true")
-    
-    # Parquet optimization for GPU
-    builder = builder \
-        .config("spark.rapids.sql.format.parquet.read.enabled", "true") \
-        .config("spark.rapids.sql.format.parquet.write.enabled", "true") \
-        .config("spark.sql.files.maxPartitionBytes", "512m")
+            .config("spark.plugins", "com.nvidia.spark.SQLPlugin") \
+            .config("spark.rapids.sql.enabled", "true") \
+            .config("spark.rapids.memory.pinnedPool.size", "4g") \
+            .config("spark.rapids.sql.concurrentGpuTasks", "2") \
+            .config("spark.executor.resource.gpu.amount", str(config.num_gpus)) \
+            .config("spark.task.resource.gpu.amount", "0.5") \
+            .config("spark.rapids.sql.format.parquet.read.enabled", "true") \
+            .config("spark.rapids.sql.format.parquet.write.enabled", "true")
     
     spark = builder.getOrCreate()
     
-    # Log configuration summary
     logger.info("=" * 60)
-    logger.info("RAPIDS Spark Configuration Summary")
-    logger.info("=" * 60)
-    logger.info(f"  RAPIDS Plugin: {spark.conf.get('spark.plugins', 'NOT SET')}")
-    logger.info(f"  GPU Tasks: {spark.conf.get('spark.rapids.sql.concurrentGpuTasks', 'NOT SET')}")
-    logger.info(f"  Pinned Memory: {spark.conf.get('spark.rapids.memory.pinnedPool.size', 'NOT SET')}")
-    logger.info(f"  GDS Enabled: {config.enable_gds}")
+    logger.info("Spark Session Initialized")
+    logger.info(f"  Master: {spark.sparkContext.master}")
+    logger.info(f"  RAPIDS: {'Enabled' if config.num_gpus > 0 else 'Disabled'}")
+    logger.info(f"  GPUs: {config.num_gpus}")
     logger.info("=" * 60)
     
     return spark
@@ -699,8 +666,6 @@ def main():
         poll_interval=int(os.getenv('POLL_INTERVAL', '5')),
         batch_mode=os.getenv('BATCH_MODE', 'false').lower() == 'true',
         num_gpus=int(os.getenv('NUM_GPUS', '2')),
-        gpu_memory_fraction=float(os.getenv('GPU_MEMORY_FRACTION', '0.8')),
-        enable_gds=os.getenv('ENABLE_GDS', 'true').lower() == 'true',
         coalesce_output=int(os.getenv('COALESCE_OUTPUT', '8'))
     )
     
@@ -713,7 +678,6 @@ def main():
     logger.info(f"  Output:      {config.output_dir}")
     logger.info(f"  Batch Mode:  {config.batch_mode}")
     logger.info(f"  GPUs:        {config.num_gpus}")
-    logger.info(f"  GDS Enabled: {config.enable_gds}")
     
     # Initialize and run service
     service = DataPrepService(config)

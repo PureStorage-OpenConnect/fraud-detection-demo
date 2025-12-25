@@ -37,7 +37,6 @@ services:
     networks:
       - fraud-detection
 
-
   # Pod 2: Data Prep - GPU-Accelerated ETL with RAPIDS for Spark
   data-prep:
     build:
@@ -49,24 +48,12 @@ services:
       - ${FB_OUTPUT_MOUNT:-/mnt/fsaai-shared/ebiser/fraud-data}:/mnt/fsaai-shared/ebiser/fraud-data:ro
       # Output: Prepared features for Pod 3
       - ${FB_MOUNT:-/mnt/fsaai-shared/ebiser}:/mnt/fsaai-shared/ebiser
-      # Spark work directory (for shuffle/spill)
-      - /tmp/spark-work:/tmp/spark-work
     environment:
-      # Directory paths
       - INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
       - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep_output
-      # Processing mode
       - BATCH_MODE=${BATCH_MODE:-false}
       - POLL_INTERVAL=${POLL_INTERVAL:-5}
-      - SPECIFIC_RUN=${SPECIFIC_RUN:-}
-      # GPU configuration
       - NUM_GPUS=${NUM_GPUS:-2}
-      - GPU_MEMORY_FRACTION=0.8
-      - ENABLE_GDS=${ENABLE_GDS:-true}
-      # Output optimization
-      - COALESCE_OUTPUT=8
-      # Spark master (local for single-node, or cluster URL)
-      - SPARK_MASTER=${SPARK_MASTER:-local[*]}
     deploy:
       resources:
         reservations:
@@ -74,22 +61,11 @@ services:
             - driver: nvidia
               count: 2
               capabilities: [gpu]
-        limits:
-          cpus: '32'
-          memory: 64G
     depends_on:
       data-gather:
         condition: service_completed_successfully
     networks:
       - fraud-detection
-    healthcheck:
-      test: ["CMD", "python", "-c", "import pyspark; print('ok')"]
-      interval: 60s
-      timeout: 30s
-      retries: 3
-      start_period: 120s
-    # Restart policy for continuous processing mode
-    restart: unless-stopped
 
   # Pod 3: Model Build (GPU Required)
   model-build:
