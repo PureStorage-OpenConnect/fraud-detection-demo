@@ -37,29 +37,26 @@ services:
     networks:
       - fraud-detection
 
-  # Pod 2: Data Prep - GPU-Accelerated ETL with RAPIDS for Spark
+  # Pod 2: Data Prep - GPU-Accelerated (RAPIDS cuDF)
   data-prep:
     build:
       context: ./pods/data-prep
       dockerfile: Dockerfile
     container_name: fraud-detection-prep
     volumes:
-      # Input: Generated data from Pod 1
       - ${FB_OUTPUT_MOUNT:-/mnt/fsaai-shared/ebiser/fraud-data}:/mnt/fsaai-shared/ebiser/fraud-data:ro
-      # Output: Prepared features for Pod 3
       - ${FB_MOUNT:-/mnt/fsaai-shared/ebiser}:/mnt/fsaai-shared/ebiser
     environment:
       - INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
       - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep_output
       - BATCH_MODE=${BATCH_MODE:-false}
       - POLL_INTERVAL=${POLL_INTERVAL:-5}
-      - NUM_GPUS=${NUM_GPUS:-2}
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 2
+              count: all
               capabilities: [gpu]
     depends_on:
       data-gather:
