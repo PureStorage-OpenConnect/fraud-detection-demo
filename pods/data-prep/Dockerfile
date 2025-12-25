@@ -5,17 +5,15 @@ USER root
 
 LABEL description="GPU-accelerated ETL using RAPIDS Accelerator for Apache Spark"
 
-ENV RAPIDS_VERSION=24.02.0
 ENV SPARK_HOME=/opt/spark
 
 # Install wget
 RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
 
-# Download RAPIDS JARs
+# Download RAPIDS Accelerator JAR (includes cudf dependency)
 RUN mkdir -p ${SPARK_HOME}/jars/rapids && \
     cd ${SPARK_HOME}/jars/rapids && \
-    wget -q https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/${RAPIDS_VERSION}/rapids-4-spark_2.12-${RAPIDS_VERSION}.jar && \
-    wget -q https://repo1.maven.org/maven2/ai/rapids/cudf/${RAPIDS_VERSION}/cudf-${RAPIDS_VERSION}-cuda12.jar
+    wget https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/24.02.0/rapids-4-spark_2.12-24.02.0.jar
 
 # Python dependencies
 COPY requirements.txt /tmp/
@@ -44,5 +42,5 @@ ENTRYPOINT ["spark-submit", \
     "--conf", "spark.rapids.sql.format.parquet.read.enabled=true", \
     "--conf", "spark.rapids.sql.format.parquet.write.enabled=true", \
     "--conf", "spark.sql.adaptive.enabled=true", \
-    "--jars", "/opt/spark/jars/rapids/rapids-4-spark_2.12-24.02.0.jar,/opt/spark/jars/rapids/cudf-24.02.0-cuda12.jar", \
+    "--jars", "/opt/spark/jars/rapids/rapids-4-spark_2.12-24.02.0.jar", \
     "/app/prepare.py"]
