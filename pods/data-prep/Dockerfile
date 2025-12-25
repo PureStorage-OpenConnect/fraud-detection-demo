@@ -9,7 +9,7 @@ WORKDIR /app
 COPY prepare.py /app/
 
 ENV INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
-ENV OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep_output
+ENV OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
 ENV BATCH_MODE=false
 ENV POLL_INTERVAL=5
 

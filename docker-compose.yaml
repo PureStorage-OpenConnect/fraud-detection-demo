@@ -1,4 +1,3 @@
-
 version: '3.8'
 
 services:
@@ -48,7 +47,7 @@ services:
       - ${FB_MOUNT:-/mnt/fsaai-shared/ebiser}:/mnt/fsaai-shared/ebiser
     environment:
       - INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
-      - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep_output
+      - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
       - BATCH_MODE=${BATCH_MODE:-false}
       - POLL_INTERVAL=${POLL_INTERVAL:-5}
     deploy:

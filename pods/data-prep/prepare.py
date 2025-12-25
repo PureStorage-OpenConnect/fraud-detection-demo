@@ -251,7 +251,7 @@ def main():
     
     config = PrepConfig(
         input_dir=os.getenv('INPUT_DIR', '/mnt/fsaai-shared/ebiser/fraud-data'),
-        output_dir=os.getenv('OUTPUT_DIR', '/mnt/fsaai-shared/ebiser/prep_output'),
+        output_dir=os.getenv('OUTPUT_DIR', '/mnt/fsaai-shared/ebiser/prep-output'),
         poll_interval=int(os.getenv('POLL_INTERVAL', '5')),
         batch_mode=os.getenv('BATCH_MODE', 'false').lower() == 'true'
     )
