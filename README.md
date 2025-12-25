@@ -2,12 +2,12 @@
 
 [![NVIDIA](https://img.shields.io/badge/NVIDIA-L40S-76B900?logo=nvidia)](https://www.nvidia.com/)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![RAPIDS](https://img.shields.io/badge/RAPIDS-cuDF%20%7C%20cuGraph-blueviolet)](https://rapids.ai/)
+[![RAPIDS](https://img.shields.io/badge/RAPIDS-Spark%20%7C%20cuDF-blueviolet)](https://rapids.ai/)
 [![Pure Storage](https://img.shields.io/badge/Pure_Storage-FlashBlade-FF6600)](https://www.purestorage.com/)
 
 ## Overview
 
-A containerized fraud detection pipeline optimized for dual NVIDIA L40S GPUs and Pure Storage. This project re-architects the [NVIDIA Financial Fraud Detection AI Blueprint](https://github.com/NVIDIA-AI-Blueprints/Financial-Fraud-Detection) into 5 independent Docker containers that work together to process transactions, train models, and detect fraud in real-time.
+A containerized fraud detection pipeline optimized for dual NVIDIA L40S GPUs and Pure Storage. This project re-architects the [NVIDIA Financial Fraud Detection AI Blueprint](https://github.com/NVIDIA-AI-Blueprints/Financial-Fraud-Detection) into 5 independent Docker containers.
 
 ---
 
@@ -20,11 +20,19 @@ graph LR
     C -->|Models| D[Pod 4<br/>Inference]
     D -->|Alerts| E[Pod 5<br/>Notification]
     
+    A -.->|Write| FB[(High-Throughput)]
+    B -.->|Read/Write| FB
+    C -.->|Read| FB
+    C -.->|Write| FA[(Low-Latency)]
+    D -.->|Read| FA
+    
     style A fill:#76B900,stroke:#333,stroke-width:2px,color:#fff
     style B fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style C fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style D fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style E fill:#1a5490,stroke:#333,stroke-width:2px,color:#fff
+    style FB fill:#FF6600,stroke:#333,stroke-width:2px,color:#fff
+    style FA fill:#FF6600,stroke:#333,stroke-width:2px,color:#fff
 ```
 
 ---
@@ -34,7 +42,7 @@ graph LR
 | Pod | Container | GPU | Purpose |
 |-----|-----------|-----|---------|
 | 1 | `data-gather` | No | High-throughput synthetic transaction data generation |
-| 2 | `data-prep` | 2x L40S | GPU-accelerated feature engineering (RAPIDS) |
+| 2 | `data-prep` | 2x L40S | GPU-accelerated ETL (RAPIDS Accelerator for Spark) |
 | 3 | `model-build` | 2x L40S | Train GNN and XGBoost models |
 | 4 | `inference` | 2x L40S | Real-time fraud detection (Triton Server) |
 | 5 | `notification` | No | Handle fraud alerts via webhook |
@@ -43,157 +51,120 @@ graph LR
 
 ## Storage
 
-This demo uses Pure Storage for high-performance data access:
-
-- **FlashBlade (FB)**: High-throughput parallel I/O for data generation and feature processing
-- **FlashArray (FA)**: Low-latency storage for model serving
-
-### Mount Points
-
+**FlashBlade** (High-Throughput Data I/O):
 | Mount Point | Purpose |
 |-------------|---------|
 | `/mnt/datasets/kaggle/creditcardfraud` | Input template (Kaggle creditcard.csv) |
-| `/mnt/fsaai-shared/ebiser/fraud-data` | Generated transaction data output |
-| `~/ebiser/nvidia.financial.fraud.detection` | Model repository |
+| `/mnt/fsaai-shared/ebiser/fraud-data` | Pod 1 → Pod 2: Generated transaction data |
+| `/mnt/fsaai-shared/ebiser/prep_output` | Pod 2 → Pod 3: Prepared features |
+
+**FlashArray** (Low-Latency Model Serving):
+| Mount Point | Purpose |
+|-------------|---------|
+| `~/ebiser/nvidia.financial.fraud.detection` | Pod 3 → Pod 4: Model repository |
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-
-- 2x NVIDIA L40S GPUs
-- Docker >= 24.x with NVIDIA Container Toolkit
-- Pure Storage FlashBlade and FlashArray mounts configured
-- [Kaggle Credit Card Fraud Dataset](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)
-
-### Installation
-
 ```bash
-# Clone repository
-git clone https://github.com/PureStorage-OpenConnect/financial-fraud-demo.git
-cd financial-fraud-demo
-
-# Build containers
+# Build all containers
 docker-compose build
 
-# Start the pipeline
+# Run full pipeline
 docker-compose up
 ```
 
 ---
 
-## Data Generation Demo
+## Pod 1: Data Gather
 
-Pod 1 demonstrates high-throughput data generation using 128 parallel workers.
-
-### Running the Demo
+Stress-tests FlashBlade with parallel synthetic data generation.
 
 ```bash
-# Run with defaults (5 minutes, 128 workers, Parquet format)
 docker-compose up data-gather
 
-# Custom configuration
-NUM_WORKERS=256 DURATION_SECONDS=600 OUTPUT_FORMAT=binary docker-compose up data-gather
+# Example with custom variables
+NUM_WORKERS=64 DURATION_SECONDS=180 OUTPUT_FORMAT=parquet docker-compose up data-gather
 ```
-
-### Output Formats
-
-| Format | Description |
-|--------|-------------|
-| `parquet` | Apache Parquet (default) - good balance of speed and compatibility |
-| `binary` | Raw numpy arrays - maximum throughput |
-| `csv` | CSV text format - most compatible |
-
-### Reading the Output
-
-```
-[   30s] Files:  128 | Size:  45.00 GB | Speed:  1.01 GB/s | ~8.3M rec/s | Workers: 128
-```
-
-| Metric | Description |
-|--------|-------------|
-| **Files** | Number of output files generated |
-| **Size** | Total data written |
-| **Speed** | Current write throughput |
-| **rec/s** | Records generated per second |
-| **Workers** | Active worker processes |
-
-### Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NUM_WORKERS` | 128 | Parallel worker processes |
-| `DURATION_SECONDS` | 300 | Demo duration (5 minutes) |
-| `CHUNK_SIZE` | 50000 | Rows per write operation |
-| `OUTPUT_FORMAT` | parquet | Output format (parquet/binary/csv) |
+| `DURATION_SECONDS` | 300 | Generation duration |
+| `CHUNK_SIZE` | 50000 | Rows per write |
+| `OUTPUT_FORMAT` | parquet | parquet, csv, or binary |
+
+**Output:** `run_YYYYMMDD_HHMMSS/` directories with `worker_*.parquet` files
 
 ---
 
-## Usage
+## Pod 2: Data Prep
 
-### Run Individual Pods
+GPU-accelerated ETL using NVIDIA RAPIDS Accelerator for Spark.
 
 ```bash
-# Pod 1: Data generation
-docker-compose up data-gather
-
-# Pod 2: Feature preparation
 docker-compose up data-prep
 
-# Pod 3: Model training
-docker-compose up model-build
-
-# Pods 4 & 5: Inference and notifications
-docker-compose up inference notification
+# Example: batch mode with custom poll interval
+BATCH_MODE=true POLL_INTERVAL=3 NUM_GPUS=2 docker-compose up data-prep
 ```
 
-### Monitor
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INPUT_DIR` | `/mnt/.../fraud-data` | Pod 1 output directory |
+| `OUTPUT_DIR` | `/mnt/.../prep_output` | Prepared features output |
+| `BATCH_MODE` | false | true = process once and exit |
+| `POLL_INTERVAL` | 5 | Seconds between directory checks |
+| `NUM_GPUS` | 2 | GPUs for Spark RAPIDS |
+
+**Features:**
+- Watches for new `run_*` directories from Pod 1
+- Standard scaling on V1-V28 PCA features
+- Time-based window features (transaction frequency, velocity)
+- Interaction features for fraud pattern detection
+
+**Output:** `features_run_YYYYMMDD_HHMMSS.parquet` + metadata JSON
+
+---
+
+## Pod 3: Model Build
+
+Train XGBoost and GNN models on prepared features.
+
+```bash
+docker-compose up model-build
+
+# Example with specific features file
+FEATURES_FILE=features_run_20240115_143022.parquet docker-compose up model-build
+```
+
+---
+
+## Pods 4 & 5: Inference and Notification
+
+Real-time fraud detection with Triton Server.
+
+```bash
+docker-compose up inference notification
+
+# Example with debug mode for notification service
+DEBUG=true docker-compose up inference notification
+```
+
+---
+
+## Monitoring
 
 ```bash
 # View logs
-docker-compose logs -f data-gather
+docker-compose logs -f <service-name>
 
-# Check GPU usage
+# GPU usage
 watch -n 1 nvidia-smi
 
 # Container stats
 docker stats
-```
-
----
-
-## Troubleshooting
-
-### Low throughput
-
-```bash
-# Verify template file exists
-ls -la /mnt/datasets/kaggle/creditcardfraud/creditcard.csv
-
-# Check output directory permissions
-ls -la /mnt/fsaai-shared/ebiser/fraud-data/
-```
-
-### GPU not detected
-
-```bash
-# Verify NVIDIA runtime
-docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
-
-# Reconfigure runtime
-sudo nvidia-ctk runtime configure --runtime=docker
-sudo systemctl restart docker
-```
-
-### Container issues
-
-```bash
-# Check logs
-docker-compose logs <service-name>
-
-# Rebuild
-docker-compose build --no-cache <service-name>
 ```
 
 ---

@@ -1,79 +1,112 @@
 #!/usr/bin/env python3
 """
-Pod 1: High-Performance Data Gather Service
-============================================
-Stress-testing tool for Pure Storage FlashBlade that generates massive amounts
-of synthetic credit card transaction data using parallel workers.
-
-Features:
-- Parallel worker processes (avoids Python GIL)
-- Schema-based generation from Kaggle creditcard.csv template
-- Timestamped output directories for run tracking
-- Real-time throughput monitoring via filesystem stats
-- Configurable runtime duration (default: 5 minutes)
-- Multiple output formats: CSV, Parquet, or raw binary
-- Optimized for maximum I/O throughput (target: 1+ GB/s)
+Pod 1: High-Performance Data Gather Service (UPDATED for Spark Compatibility)
+==============================================================================
+Changes from original:
+1. Added _SUCCESS marker file on completion (Spark convention)
+2. Added _manifest.json with file listing and schema
+3. Improved schema metadata for Spark schema inference
+4. Added partition hints for optimal Spark parallelism
 """
 
-import os
-import sys
-import time
-import signal
-import subprocess
+# =============================================================================
+# ADD THESE IMPORTS (if not present)
+# =============================================================================
+import json
 from pathlib import Path
-from datetime import datetime
-from typing import Dict, List
 
-import pandas as pd
-import numpy as np
+# =============================================================================
+# ADD THIS FUNCTION after the existing run_stress_test function
+# =============================================================================
 
-# Global stop flag for signal handling
-STOP_FLAG = False
-
-
-def log(msg: str):
-    """Simple timestamped logging to stdout"""
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{ts} - {msg}", flush=True)
-
-
-def load_schema(template_path: Path) -> Dict:
-    """Load schema from creditcard.csv template"""
-    log(f"Loading schema template from: {template_path}")
+def write_spark_metadata(output_path: Path, schema: dict, file_pattern: str, 
+                         total_files: int, total_bytes: int, output_format: str):
+    """
+    Write Spark-compatible metadata files for efficient directory processing.
     
-    if not template_path.exists():
-        raise FileNotFoundError(f"Template file not found: {template_path}")
+    Creates:
+    - _SUCCESS: Marker file indicating complete write (Spark convention)
+    - _manifest.json: File listing with schema for Spark readers
+    - _spark_schema.json: Explicit schema for Spark schema inference
+    """
     
-    df_sample = pd.read_csv(template_path, nrows=10000)
-    columns = list(df_sample.columns)
-    stats = {}
+    # 1. Write _SUCCESS marker (empty file, Spark convention)
+    success_file = output_path / "_SUCCESS"
+    success_file.touch()
     
-    for col in columns:
-        if np.issubdtype(df_sample[col].dtype, np.number):
-            stats[col] = {
-                'mean': float(df_sample[col].mean()),
-                'std': float(df_sample[col].std())
-            }
+    # 2. Write manifest with file listing
+    files = sorted([f.name for f in output_path.glob(file_pattern)])
+    manifest = {
+        "format": output_format,
+        "files": files,
+        "total_files": total_files,
+        "total_bytes": total_bytes,
+        "schema": schema,
+        "partition_hint": min(total_files, 128),  # Suggested parallelism
+        "completed_at": datetime.now().isoformat()
+    }
     
-    log(f"Schema loaded: {len(columns)} columns")
-    return {'columns': columns, 'stats': stats}
+    manifest_file = output_path / "_manifest.json"
+    with open(manifest_file, 'w') as f:
+        json.dump(manifest, f, indent=2)
+    
+    # 3. Write Spark-compatible schema
+    spark_schema = {
+        "type": "struct",
+        "fields": []
+    }
+    
+    # Build Spark schema from columns
+    for col in schema.get('columns', []):
+        if col == 'Class':
+            field_type = "integer"
+        elif col == 'Time':
+            field_type = "float"
+        else:
+            field_type = "float"
+        
+        spark_schema["fields"].append({
+            "name": col,
+            "type": field_type,
+            "nullable": True,
+            "metadata": {}
+        })
+    
+    spark_schema_file = output_path / "_spark_schema.json"
+    with open(spark_schema_file, 'w') as f:
+        json.dump(spark_schema, f, indent=2)
+    
+    log(f"Wrote Spark metadata files to {output_path}")
 
 
-def get_dir_stats(output_path: Path, file_pattern: str) -> tuple:
-    """Get total size and file count from directory"""
-    files = list(output_path.glob(file_pattern))
-    if not files:
-        return 0, 0
-    total_bytes = sum(f.stat().st_size for f in files)
-    return total_bytes, len(files)
+# =============================================================================
+# MODIFY run_stress_test() - Add this block BEFORE the final return statement
+# =============================================================================
+
+def run_stress_test_updated_ending():
+    """
+    ADD THIS BLOCK at the end of run_stress_test(), 
+    just before 'schema_file.unlink(missing_ok=True)'
+    """
+    
+    # Write Spark-compatible metadata
+    write_spark_metadata(
+        output_path=output_path,
+        schema=schema,
+        file_pattern=file_pattern,
+        total_files=final_files,
+        total_bytes=final_bytes,
+        output_format=output_format
+    )
+    
+    # Keep schema file for Spark (don't delete it)
+    # Comment out or remove: schema_file.unlink(missing_ok=True)
 
 
-def signal_handler(signum, frame):
-    """Handle SIGINT/SIGTERM"""
-    global STOP_FLAG
-    log(f"Received signal {signum}, stopping...")
-    STOP_FLAG = True
-
+# =============================================================================
+# FULL UPDATED run_stress_test FUNCTION (for reference)
+# Replace the existing function with this version
+# =============================================================================
 
 def run_stress_test(
     template_path: Path,
@@ -83,7 +116,7 @@ def run_stress_test(
     chunk_size: int,
     output_format: str = 'parquet'
 ):
-    """Main stress test orchestrator"""
+    """Main stress test orchestrator - UPDATED with Spark metadata"""
     global STOP_FLAG
     
     # Create timestamped output directory
@@ -105,13 +138,14 @@ def run_stress_test(
     log(f"Format:     {output_format}")
     log("=" * 70)
     
-    # Save schema for workers
-    import json
+    # Save schema for workers (keep for Spark too)
     schema_file = output_path / "_schema.json"
     with open(schema_file, 'w') as f:
         json.dump(schema, f)
     
     log(f"Starting {num_workers} worker processes...")
+    
+    # [... worker_script and process launching code remains unchanged ...]
     
     # Worker script optimized for throughput
     worker_script = f'''
@@ -200,10 +234,10 @@ else:  # csv
     # Determine file pattern based on format
     if output_format == 'parquet':
         file_pattern = "worker_*.parquet"
-        bytes_per_row = 130  # Approximate for parquet
+        bytes_per_row = 130
     elif output_format == 'binary':
         file_pattern = "worker_*.bin"
-        bytes_per_row = 31 * 4  # 31 float32 columns
+        bytes_per_row = 31 * 4
     else:
         file_pattern = "worker_*.csv"
         bytes_per_row = 200
@@ -236,7 +270,6 @@ else:  # csv
             est_records = current_bytes // bytes_per_row
             rps = (interval_bytes // bytes_per_row) / interval_time if interval_time > 0 else 0
             
-            # Color code based on throughput
             speed_str = f"{mbps:6.1f} MB/s"
             if mbps >= 1000:
                 speed_str = f"{gbps:5.2f} GB/s"
@@ -284,6 +317,18 @@ else:  # csv
     avg_mbps = (final_bytes / (1024 * 1024)) / total_elapsed if total_elapsed > 0 else 0
     est_records = final_bytes // bytes_per_row
     
+    # =========================================================================
+    # NEW: Write Spark-compatible metadata
+    # =========================================================================
+    write_spark_metadata(
+        output_path=output_path,
+        schema=schema,
+        file_pattern=file_pattern,
+        total_files=final_files,
+        total_bytes=final_bytes,
+        output_format=output_format
+    )
+    
     log("=" * 70)
     log("FINAL RESULTS")
     log("=" * 70)
@@ -297,45 +342,10 @@ else:  # csv
     else:
         log(f"Throughput:  {avg_mbps:.1f} MB/s average")
     log(f"Est Records: ~{est_records:,}")
+    log(f"Spark Ready: _SUCCESS, _manifest.json, _spark_schema.json written")
     log("=" * 70)
     
-    schema_file.unlink(missing_ok=True)
+    # NOTE: Keep schema_file for Spark - don't delete it
+    # schema_file.unlink(missing_ok=True)  # REMOVED
+    
     return output_path
-
-
-def main():
-    """Main entry point"""
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    template_dir = os.getenv('TEMPLATE_DIR', '/mnt/datasets/kaggle/creditcardfraud')
-    template_file = os.getenv('TEMPLATE_FILE', 'creditcard.csv')
-    output_dir = os.getenv('OUTPUT_DIR', '/mnt/fsaai-shared/ebiser/fraud-data')
-    num_workers = int(os.getenv('NUM_WORKERS', '128'))
-    duration_seconds = int(os.getenv('DURATION_SECONDS', '300'))
-    chunk_size = int(os.getenv('CHUNK_SIZE', '50000'))  # Larger default for better throughput
-    output_format = os.getenv('OUTPUT_FORMAT', 'parquet')  # parquet, csv, or binary
-    
-    template_path = Path(template_dir) / template_file
-    output_base = Path(output_dir)
-    
-    log("Configuration:")
-    log(f"  Template: {template_path}")
-    log(f"  Output:   {output_base}")
-    log(f"  Workers:  {num_workers}")
-    log(f"  Duration: {duration_seconds}s")
-    log(f"  Chunk:    {chunk_size} rows")
-    log(f"  Format:   {output_format}")
-    
-    run_stress_test(
-        template_path=template_path,
-        output_base=output_base,
-        num_workers=num_workers,
-        duration_seconds=duration_seconds,
-        chunk_size=chunk_size,
-        output_format=output_format
-    )
-
-
-if __name__ == "__main__":
-    main()

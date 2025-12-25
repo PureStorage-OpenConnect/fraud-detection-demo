@@ -1,34 +1,43 @@
-FROM nvcr.io/nvidia/pytorch:23.10-py3
+# Pod 2: Data Prep - RAPIDS Accelerator for Spark
+FROM nvcr.io/nvidia/spark:3.5.0-py3
 
-LABEL maintainer="your.email@example.com"
-LABEL description="Pod 3: Model Build Service for NVIDIA Fraud Detection Pipeline"
+LABEL description="GPU-accelerated ETL using RAPIDS Accelerator for Apache Spark"
 
-# Set working directory
+ENV RAPIDS_VERSION=24.02.0
+ENV SPARK_HOME=/opt/spark
+
+# Download RAPIDS JARs
+RUN mkdir -p ${SPARK_HOME}/jars/rapids && \
+    cd ${SPARK_HOME}/jars/rapids && \
+    wget -q https://repo1.maven.org/maven2/com/nvidia/rapids-4-spark_2.12/${RAPIDS_VERSION}/rapids-4-spark_2.12-${RAPIDS_VERSION}.jar && \
+    wget -q https://repo1.maven.org/maven2/ai/rapids/cudf/${RAPIDS_VERSION}/cudf-${RAPIDS_VERSION}-cuda12.jar
+
+# Python dependencies
+COPY requirements.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+# Application
+COPY prepare.py /app/
 WORKDIR /app
 
-# Install RAPIDS and XGBoost
-RUN pip install --no-cache-dir \
-    cudf-cu12==23.10.* \
-    cuml-cu12==23.10.* \
-    cugraph-cu12==23.10.* \
-    xgboost==2.0.2 \
-    torch-geometric==2.4.0 \
-    boto3==1.34.34 \
-    pyarrow==14.0.1
+# Default environment
+ENV INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
+ENV OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep_output
+ENV NUM_GPUS=2
+ENV BATCH_MODE=false
+ENV POLL_INTERVAL=5
 
-# Copy application files
-COPY train.py /app/
-
-# Set environment variables
-ENV FB_MOUNT=/mnt/fsaai-shared/ebiser
-ENV FA_MOUNT=/root/ebiser/nvidia.financial.fraud.detection
-ENV S3_ENDPOINT=""
-ENV S3_ACCESS_KEY=""
-ENV S3_SECRET_KEY=""
-ENV S3_BUCKET=""
-ENV FEATURES_FILE=""
-ENV PYTHONUNBUFFERED=1
-ENV CUDA_VISIBLE_DEVICES=0,1
-
-# Run the application
-CMD ["python", "train.py"]
+ENTRYPOINT ["spark-submit", \
+    "--master", "local[*]", \
+    "--driver-memory", "16g", \
+    "--conf", "spark.plugins=com.nvidia.spark.SQLPlugin", \
+    "--conf", "spark.rapids.sql.enabled=true", \
+    "--conf", "spark.rapids.memory.pinnedPool.size=4g", \
+    "--conf", "spark.rapids.sql.concurrentGpuTasks=2", \
+    "--conf", "spark.executor.resource.gpu.amount=2", \
+    "--conf", "spark.task.resource.gpu.amount=0.5", \
+    "--conf", "spark.rapids.sql.format.parquet.read.enabled=true", \
+    "--conf", "spark.rapids.sql.format.parquet.write.enabled=true", \
+    "--conf", "spark.sql.adaptive.enabled=true", \
+    "--jars", "/opt/spark/jars/rapids/rapids-4-spark_2.12-24.02.0.jar,/opt/spark/jars/rapids/cudf-24.02.0-cuda12.jar", \
+    "/app/prepare.py"]

@@ -1,7 +1,4 @@
-# RAPIDS libraries (included in base image)
-# cudf==23.10.*
-# cuml==23.10.*
-# cugraph==23.10.*
-
-# Additional dependencies
-pyarrow==14.0.1
+# Pod 2: Data Prep
+pyarrow>=14.0.0
+pandas>=2.1.0
+numpy>=1.26.0
