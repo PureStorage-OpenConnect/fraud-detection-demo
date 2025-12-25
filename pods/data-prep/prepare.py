@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import cudf
 import cupy as cp
 import numpy as np
+import numpy as np
 
 logging.basicConfig(
     level=logging.INFO,
@@ -156,6 +157,14 @@ class DataPrepService:
         self.watcher = DirectoryWatcher(self.input_path)
         self.engineer = FeatureEngineer()
         
+        # Verify GPU availability
+        try:
+            gpu_count = cp.cuda.runtime.getDeviceCount()
+            gpu_name = cp.cuda.runtime.getDeviceProperties(0)['name'].decode()
+            log(f"GPU: {gpu_count}x {gpu_name}")
+        except Exception as e:
+            log(f"WARNING: GPU check failed: {e}")
+        
         log("=" * 60)
         log("Pod 2: Data Prep Service (RAPIDS cuDF - GPU)")
         log("=" * 60)
@@ -165,18 +174,51 @@ class DataPrepService:
         log("=" * 60)
     
     def read_run_data(self, run_dir: Path) -> Optional[cudf.DataFrame]:
+        """Read data from a run directory - supports parquet, csv, and binary formats."""
+        
+        # Try Parquet first (preferred - fastest)
         parquet_files = sorted(run_dir.glob("worker_*.parquet"))
         if parquet_files:
-            log(f"Reading {len(parquet_files)} Parquet files to GPU...")
+            log(f"Found {len(parquet_files)} Parquet files, reading to GPU...")
+            start = time.time()
             dfs = [cudf.read_parquet(str(f)) for f in parquet_files]
-            return cudf.concat(dfs, ignore_index=True)
+            df = cudf.concat(dfs, ignore_index=True)
+            elapsed = time.time() - start
+            log(f"Loaded {len(df):,} records in {elapsed:.1f}s ({len(df)/elapsed:,.0f} rec/s)")
+            return df
         
+        # Try CSV
         csv_files = sorted(run_dir.glob("worker_*.csv"))
         if csv_files:
-            log(f"Reading {len(csv_files)} CSV files to GPU...")
+            log(f"Found {len(csv_files)} CSV files, reading to GPU...")
+            start = time.time()
             dfs = [cudf.read_csv(str(f)) for f in csv_files]
-            return cudf.concat(dfs, ignore_index=True)
+            df = cudf.concat(dfs, ignore_index=True)
+            elapsed = time.time() - start
+            log(f"Loaded {len(df):,} records in {elapsed:.1f}s ({len(df)/elapsed:,.0f} rec/s)")
+            return df
         
+        # Try binary (raw numpy float32 arrays - 31 columns)
+        bin_files = sorted(run_dir.glob("worker_*.bin"))
+        if bin_files:
+            log(f"Found {len(bin_files)} binary files, reading to GPU...")
+            start = time.time()
+            
+            # Binary format: 31 float32 columns per row
+            columns = ['Time'] + [f'V{i}' for i in range(1, 29)] + ['Amount', 'Class']
+            arrays = []
+            for f in bin_files:
+                data = np.fromfile(str(f), dtype=np.float32).reshape(-1, 31)
+                arrays.append(data)
+            
+            combined = np.vstack(arrays)
+            df = cudf.DataFrame(combined, columns=columns)
+            elapsed = time.time() - start
+            log(f"Loaded {len(df):,} records in {elapsed:.1f}s ({len(df)/elapsed:,.0f} rec/s)")
+            return df
+        
+        log(f"No data files found in {run_dir}")
+        log(f"  Checked: worker_*.parquet, worker_*.csv, worker_*.bin")
         return None
     
     def write_output(self, df: cudf.DataFrame, run_name: str):
@@ -229,11 +271,13 @@ class DataPrepService:
         global STOP_FLAG
         
         if self.config.batch_mode:
-            for run_dir in self.watcher.get_new_runs():
+            runs = self.watcher.get_new_runs()
+            log(f"Batch mode: found {len(runs)} run(s) to process")
+            for run_dir in runs:
                 self.process_run(run_dir)
             log("Batch complete")
         else:
-            log("Continuous mode - watching for new runs...")
+            log("Watching for new runs...")
             while not STOP_FLAG:
                 for run_dir in self.watcher.get_new_runs():
                     if STOP_FLAG:
