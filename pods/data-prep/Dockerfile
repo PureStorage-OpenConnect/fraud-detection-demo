@@ -1,16 +1,15 @@
 # Pod 2: Data Prep - RAPIDS Accelerator for Spark
-#
-# NGC Authentication required before build:
-#   docker login nvcr.io -u '$oauthtoken' -p <NGC_API_KEY>
-#
-# Get your API key from: https://ngc.nvidia.com/setup/api-key
-#
-FROM nvcr.io/nvidia/spark:3.5.0-py3
+FROM apache/spark:3.5.0-python3
+
+USER root
 
 LABEL description="GPU-accelerated ETL using RAPIDS Accelerator for Apache Spark"
 
 ENV RAPIDS_VERSION=24.02.0
 ENV SPARK_HOME=/opt/spark
+
+# Install wget
+RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
 
 # Download RAPIDS JARs
 RUN mkdir -p ${SPARK_HOME}/jars/rapids && \
