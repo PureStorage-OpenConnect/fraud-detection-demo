@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import cudf
 import cupy as cp
 import numpy as np
+import pyarrow.parquet as pq
 
 STOP_FLAG = False
 
@@ -341,26 +342,40 @@ class DataPrepService:
         return df
     
     def write_output(self, df: cudf.DataFrame, run_name: str):
-        """Write processed data to parquet."""
+        """Write processed data to parquet via CPU (avoids GPU OOM on large writes)."""
         output_file = self.output_path / f"features_{run_name}.parquet"
         log(f"Writing: {output_file.name}")
         
-        df.to_parquet(str(output_file), compression='snappy')
+        # Convert to pandas and free GPU memory before writing
+        # This uses host RAM instead of GPU VRAM for the write buffer
+        log(f"  Transferring {len(df):,} records to CPU...")
+        pdf = df.to_pandas()
+        
+        # Free GPU memory
+        del df
+        cp.get_default_memory_pool().free_all_blocks()
+        
+        # Write from CPU memory (much larger capacity)
+        pdf.to_parquet(str(output_file), compression='snappy', index=False)
+        del pdf
         
         size_mb = output_file.stat().st_size / (1024*1024)
-        log(f"Output: {size_mb:.1f} MB, {len(df):,} records")
+        log(f"Output: {size_mb:.1f} MB")
         
         # Metadata for Pod 3
-        exclude = ['transaction_id', 'source_run', 'prep_timestamp', 'Class']
-        feature_cols = [c for c in df.columns if c not in exclude]
+        pf = pq.ParquetFile(output_file)
+        columns = pf.schema.names
+        
+        exclude = ['transaction_id', 'prep_timestamp', 'Class']
+        feature_cols = [c for c in columns if c not in exclude]
         
         metadata = {
             "run_name": run_name,
             "timestamp": datetime.now().isoformat(),
-            "columns": list(df.columns),
+            "columns": columns,
             "feature_columns": feature_cols,
             "target_column": "Class",
-            "record_count": len(df)
+            "record_count": pf.metadata.num_rows
         }
         
         meta_file = self.output_path / f"metadata_{run_name}.json"
@@ -383,14 +398,13 @@ class DataPrepService:
             # Engineer features
             df = self.engineer.process(df, run_name)
             
-            # Write output
+            # Write output (this transfers to CPU and frees GPU memory)
             self.write_output(df, run_name)
             
             # Mark as processed
             self.watcher.mark_processed(run_dir)
             
-            # Cleanup
-            del df
+            # df already freed in write_output
             cp.get_default_memory_pool().free_all_blocks()
             
             log(f"SUCCESS: {run_name}")
