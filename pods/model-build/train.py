@@ -49,10 +49,14 @@ class GNNModel(nn.Module):
 class ModelBuildService:
     """Train GNN and XGBoost models"""
     
-    def __init__(self, fb_mount: str, fa_mount: str, s3_bucket: str = None):
+    def __init__(self, fb_mount: str, fa_mount: str, s3_bucket: str = None, prep_output_dir: str = None):
         self.fb_mount = Path(fb_mount)
         self.fa_mount = Path(fa_mount)
-        self.prep_output_path = self.fb_mount / "prep_output"
+        # Allow override via parameter or use default
+        if prep_output_dir:
+            self.prep_output_path = Path(prep_output_dir)
+        else:
+            self.prep_output_path = self.fb_mount / "prep-output"
         self.model_repo_path = self.fa_mount / "model_repository"
         self.s3_bucket = s3_bucket
         self.s3_client = None
@@ -329,8 +333,9 @@ def main():
     fa_mount = os.getenv('FA_MOUNT', '~/ebiser/nvidia.financial.fraud.detection')
     s3_bucket = os.getenv('S3_BUCKET')
     features_file = os.getenv('FEATURES_FILE', None)
+    prep_output_dir = os.getenv('PREP_OUTPUT_DIR', None)  # Optional override
     
-    service = ModelBuildService(fb_mount, fa_mount, s3_bucket)
+    service = ModelBuildService(fb_mount, fa_mount, s3_bucket, prep_output_dir)
     service.run(features_file)
 
 if __name__ == "__main__":

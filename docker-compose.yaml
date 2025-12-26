@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Pod 1: Data Gather - High-Performance FlashBlade Stress Test
   data-gather:
@@ -19,7 +17,8 @@ services:
       # Performance tuning
       - NUM_WORKERS=${NUM_WORKERS:-128}
       - DURATION_SECONDS=${DURATION_SECONDS:-300}
-      - CHUNK_SIZE=${CHUNK_SIZE:-10000}
+      - CHUNK_SIZE=${CHUNK_SIZE:-2000000}
+      - OUTPUT_FORMAT=${OUTPUT_FORMAT:-parquet}
     # Resource allocation for high-thread workloads
     deploy:
       resources:
@@ -36,11 +35,9 @@ services:
     networks:
       - fraud-detection
 
-  # Pod 2: Data Prep - GPU-Accelerated (RAPIDS cuDF)
+  # Pod 2: Data Prep (GPU Required) - RAPIDS cuDF
   data-prep:
-    build:
-      context: ./pods/data-prep
-      dockerfile: Dockerfile
+    build: ./pods/data-prep
     container_name: fraud-detection-prep
     volumes:
       - ${FB_OUTPUT_MOUNT:-/mnt/fsaai-shared/ebiser/fraud-data}:/mnt/fsaai-shared/ebiser/fraud-data:ro
@@ -50,6 +47,8 @@ services:
       - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
       - BATCH_MODE=${BATCH_MODE:-false}
       - POLL_INTERVAL=${POLL_INTERVAL:-5}
+      - MAX_FILES_PER_RUN=${MAX_FILES_PER_RUN:-500}
+      - LATEST_ONLY=${LATEST_ONLY:-true}
     deploy:
       resources:
         reservations:
@@ -58,8 +57,7 @@ services:
               count: all
               capabilities: [gpu]
     depends_on:
-      data-gather:
-        condition: service_completed_successfully
+      - data-gather
     networks:
       - fraud-detection
 

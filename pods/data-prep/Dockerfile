@@ -12,5 +12,7 @@ ENV INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
 ENV OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
 ENV BATCH_MODE=false
 ENV POLL_INTERVAL=5
+ENV MAX_FILES_PER_RUN=500
+ENV LATEST_ONLY=true
 
 ENTRYPOINT ["python", "/app/prepare.py"]
