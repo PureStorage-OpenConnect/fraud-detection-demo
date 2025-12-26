@@ -29,9 +29,9 @@ class PrepConfig:
     output_dir: str
     poll_interval: int = 5
     batch_mode: bool = False
-    max_files_per_run: int = 20  # Reduced - 20 files × 260MB = ~5GB, safe for GPU
+    max_files_per_run: int = 50  # 50 files with incremental concat should be safe
     latest_only: bool = True
-    file_stable_seconds: int = 10  # Wait for files to be this old before reading
+    file_stable_seconds: int = 10
 
 
 def signal_handler(signum, frame):
@@ -41,18 +41,19 @@ def signal_handler(signum, frame):
 
 
 def log(msg: str):
-    """Single logging function - uses stderr to avoid duplication issues."""
+    """Single logging function."""
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    sys.stderr.write(f"{ts} - {msg}\n")
-    sys.stderr.flush()
+    # Write only to stdout to avoid Docker capturing both streams
+    print(f"{ts} - {msg}", file=sys.stdout, flush=True)
 
 
 class DirectoryWatcher:
     """Watch for new run directories from Pod 1."""
     
-    def __init__(self, watch_dir: Path):
+    def __init__(self, watch_dir: Path, state_dir: Path):
         self.watch_dir = watch_dir
-        self.state_file = watch_dir / ".prep_state.json"
+        # State file goes in output dir (writable), not input dir (read-only)
+        self.state_file = state_dir / ".prep_state.json"
         self.processed_dirs: Set[str] = self._load_state()
     
     def _load_state(self) -> Set[str]:
@@ -172,7 +173,7 @@ class DataPrepService:
         self.output_path = Path(config.output_dir)
         self.output_path.mkdir(parents=True, exist_ok=True)
         
-        self.watcher = DirectoryWatcher(self.input_path)
+        self.watcher = DirectoryWatcher(self.input_path, self.output_path)
         self.engineer = FeatureEngineer()
         
         # Verify GPU availability
@@ -289,19 +290,27 @@ class DataPrepService:
         if not output_parts:
             return None
         
-        # If we have few enough parts, concat them
-        if len(output_parts) <= 3:
-            log(f"  Combining {len(output_parts)} parts...")
-            df = cudf.concat(output_parts, ignore_index=True)
+        # Incrementally concat to avoid memory explosion
+        # Concat pairs until we have one dataframe
+        log(f"  Merging {len(output_parts)} parts...")
+        while len(output_parts) > 1:
+            new_parts = []
+            for i in range(0, len(output_parts), 2):
+                if i + 1 < len(output_parts):
+                    # Concat pair
+                    merged = cudf.concat([output_parts[i], output_parts[i+1]], ignore_index=True)
+                    new_parts.append(merged)
+                else:
+                    # Odd one out, keep as is
+                    new_parts.append(output_parts[i])
+            # Clear old parts and free memory
             del output_parts
             cp.get_default_memory_pool().free_all_blocks()
-        else:
-            # Too many parts - just return the first chunk for now
-            # (Full solution would process each chunk and merge outputs)
-            log(f"  Using first {len(output_parts[0]):,} records (memory limit)")
-            df = output_parts[0]
-            del output_parts
-            cp.get_default_memory_pool().free_all_blocks()
+            output_parts = new_parts
+        
+        df = output_parts[0]
+        del output_parts
+        cp.get_default_memory_pool().free_all_blocks()
         
         elapsed = time.time() - start
         log(f"Loaded {len(df):,} records in {elapsed:.1f}s")
@@ -441,7 +450,7 @@ def main():
         output_dir=os.getenv('OUTPUT_DIR', '/mnt/fsaai-shared/ebiser/prep-output'),
         poll_interval=int(os.getenv('POLL_INTERVAL', '5')),
         batch_mode=os.getenv('BATCH_MODE', 'false').lower() == 'true',
-        max_files_per_run=int(os.getenv('MAX_FILES_PER_RUN', '20')),
+        max_files_per_run=int(os.getenv('MAX_FILES_PER_RUN', '50')),
         latest_only=os.getenv('LATEST_ONLY', 'true').lower() == 'true',
         file_stable_seconds=int(os.getenv('FILE_STABLE_SECONDS', '10'))
     )
