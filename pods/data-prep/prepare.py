@@ -43,7 +43,7 @@ class PrepConfig:
     output_dir: str
     poll_interval: int = 5
     batch_mode: bool = False
-    max_files_per_run: int = 100  # Can handle more with multi-GPU
+    max_files_per_run: int = 50  # Balance between throughput and memory
     latest_only: bool = True
     file_stable_seconds: int = 10
     use_multi_gpu: bool = True  # Enable multi-GPU by default
@@ -234,13 +234,13 @@ class DataPrepService:
             log(f"Initializing Dask cluster with {self.gpu_count} GPUs...")
             
             # Create cluster with one worker per GPU
+            # Don't pre-allocate RMM pools - let CUDA allocate on demand
             self.dask_cluster = LocalCUDACluster(
                 n_workers=self.gpu_count,
                 threads_per_worker=1,
-                memory_limit='40GB',  # Leave headroom on 44GB GPUs
-                device_memory_limit='40GB',
-                rmm_pool_size='35GB',
-                jit_unspill=True,
+                memory_limit='60GB',  # Host memory limit per worker
+                device_memory_limit='40GB',  # GPU memory limit per worker
+                rmm_managed_memory=True,  # Use managed memory for better overflow handling
             )
             
             self.dask_client = Client(self.dask_cluster)
@@ -370,6 +370,15 @@ class DataPrepService:
             
         except Exception as e:
             log(f"  WARNING: Multi-GPU load failed: {e}")
+            
+            # Clean up Dask cluster to release GPU memory before fallback
+            log(f"  Shutting down Dask cluster to free GPU memory...")
+            self._cleanup_dask()
+            self.multi_gpu_enabled = False
+            
+            # Force GPU memory cleanup
+            cp.get_default_memory_pool().free_all_blocks()
+            
             log(f"  Falling back to single-GPU chunked loading...")
             return self._load_files_chunked(files, 'parquet')
     
@@ -619,7 +628,7 @@ def main():
         output_dir=os.getenv('OUTPUT_DIR', '/mnt/fsaai-shared/ebiser/prep-output'),
         poll_interval=int(os.getenv('POLL_INTERVAL', '5')),
         batch_mode=os.getenv('BATCH_MODE', 'false').lower() == 'true',
-        max_files_per_run=int(os.getenv('MAX_FILES_PER_RUN', '100')),  # Higher default for multi-GPU
+        max_files_per_run=int(os.getenv('MAX_FILES_PER_RUN', '50')),
         latest_only=os.getenv('LATEST_ONLY', 'true').lower() == 'true',
         file_stable_seconds=int(os.getenv('FILE_STABLE_SECONDS', '10')),
         use_multi_gpu=os.getenv('USE_MULTI_GPU', 'true').lower() == 'true'

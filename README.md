@@ -157,7 +157,7 @@ GPU-accelerated feature engineering using RAPIDS Dask-cuDF for multi-GPU paralle
 **Configuration:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_FILES_PER_RUN` | 100 | Files to process per run |
+| `MAX_FILES_PER_RUN` | 50 | Files to process per run |
 | `USE_MULTI_GPU` | true | Enable Dask multi-GPU |
 | `LATEST_ONLY` | true | Process only newest run |
 
@@ -244,7 +244,7 @@ CHUNK_SIZE=2000000
 OUTPUT_FORMAT=parquet
 
 # Pod 2: Feature engineering
-MAX_FILES_PER_RUN=100
+MAX_FILES_PER_RUN=50
 USE_MULTI_GPU=true
 LATEST_ONLY=true
 
