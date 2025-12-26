@@ -459,16 +459,29 @@ class DataPrepService:
             log("Batch complete")
         else:
             log("Watching for new runs...")
+            last_status_time = time.time()
+            status_interval = 30  # Show waiting message every 30 seconds
+            runs_processed = 0
+            
             while not STOP_FLAG:
                 runs = self.watcher.get_new_runs(
                     latest_only=self.config.latest_only,
                     min_age_seconds=self.config.file_stable_seconds
                 )
                 
-                for run_dir in runs:
-                    if STOP_FLAG:
-                        break
-                    self.process_run(run_dir)
+                if runs:
+                    for run_dir in runs:
+                        if STOP_FLAG:
+                            break
+                        if self.process_run(run_dir):
+                            runs_processed += 1
+                    last_status_time = time.time()
+                else:
+                    # Show periodic waiting message
+                    if time.time() - last_status_time >= status_interval:
+                        processed_str = f" ({runs_processed} processed)" if runs_processed > 0 else ""
+                        log(f"Waiting for new data in {self.input_path.name}...{processed_str}")
+                        last_status_time = time.time()
                 
                 if not STOP_FLAG:
                     time.sleep(self.config.poll_interval)

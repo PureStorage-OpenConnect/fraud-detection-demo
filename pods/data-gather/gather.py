@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-Pod 1: High-Performance Data Gather Service
-============================================
-Stress-testing tool for Pure Storage FlashBlade that generates massive amounts
-of synthetic credit card transaction data using parallel workers.
+Pod 1: Data Gather Service
+==========================
+High-performance synthetic transaction data generator for the Financial Fraud
+Detection demo. Generates realistic credit card transaction data at scale
+using Pure Storage FlashBlade for high-throughput parallel writes.
+
+This service demonstrates:
+- Pure Storage FlashBlade parallel I/O capabilities
+- Scalable data generation for ML training pipelines
+- Schema-based synthetic data matching Kaggle creditcard.csv format
 
 Features:
 - Parallel worker processes (avoids Python GIL)
 - Schema-based generation from Kaggle creditcard.csv template
 - Timestamped output directories for run tracking
-- Real-time throughput monitoring via filesystem stats
+- Real-time throughput monitoring
 - Configurable runtime duration (default: 5 minutes)
-- Multiple output formats: CSV, Parquet, or raw binary
-- Optimized for maximum I/O throughput (target: 1+ GB/s)
+- Multiple output formats: Parquet, CSV, or raw binary
 """
 
 import os
@@ -75,7 +80,7 @@ def signal_handler(signum, frame):
     STOP_FLAG = True
 
 
-def run_stress_test(
+def run_data_generation(
     template_path: Path,
     output_base: Path,
     num_workers: int,
@@ -83,7 +88,7 @@ def run_stress_test(
     chunk_size: int,
     output_format: str = 'parquet'
 ):
-    """Main stress test orchestrator"""
+    """Main data generation orchestrator"""
     global STOP_FLAG
     
     # Create timestamped output directory
@@ -92,7 +97,7 @@ def run_stress_test(
     output_path.mkdir(parents=True, exist_ok=True)
     
     log("=" * 70)
-    log("Pod 1: FlashBlade High-Performance Stress Test")
+    log("Pod 1: Financial Fraud Data Generator")
     log("=" * 70)
     log(f"Output directory: {output_path}")
     
@@ -327,7 +332,7 @@ def main():
     log(f"  Chunk:    {chunk_size} rows")
     log(f"  Format:   {output_format}")
     
-    run_stress_test(
+    run_data_generation(
         template_path=template_path,
         output_base=output_base,
         num_workers=num_workers,
