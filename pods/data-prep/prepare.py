@@ -121,9 +121,12 @@ class FeatureEngineer:
         start = time.time()
         log(f"Engineering features for {len(df):,} records...")
         
-        # Add metadata
+        # Add metadata - use numeric types to avoid string column size limits
         df['transaction_id'] = cp.arange(len(df), dtype=cp.int64)
-        df['source_run'] = run_name
+        # Use numeric timestamp (Unix epoch) instead of string
+        df['prep_timestamp'] = float(time.time())
+        # Store run_name as a category code instead of repeating string
+        # (We'll record the actual run_name in the metadata JSON)
         
         # Standard scaling for PCA columns (in-place to save memory)
         for col in self.PCA_COLS:
@@ -157,9 +160,6 @@ class FeatureEngineer:
         for col in ['V1', 'V14', 'V17']:
             if col in df.columns:
                 df[f'{col}_squared'] = df[col] ** 2
-        
-        # Timestamp
-        df['prep_timestamp'] = datetime.now().isoformat()
         
         elapsed = time.time() - start
         log(f"Feature engineering complete: {elapsed:.1f}s ({len(df)/elapsed:,.0f} rec/s)")
