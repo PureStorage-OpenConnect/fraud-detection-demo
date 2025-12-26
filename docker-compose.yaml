@@ -47,7 +47,7 @@ services:
       - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
       - BATCH_MODE=${BATCH_MODE:-false}
       - POLL_INTERVAL=${POLL_INTERVAL:-5}
-      - MAX_FILES_PER_RUN=${MAX_FILES_PER_RUN:-100}
+      - MAX_FILES_PER_RUN=${MAX_FILES_PER_RUN:-20}
       - LATEST_ONLY=${LATEST_ONLY:-true}
       - FILE_STABLE_SECONDS=${FILE_STABLE_SECONDS:-10}
     deploy:

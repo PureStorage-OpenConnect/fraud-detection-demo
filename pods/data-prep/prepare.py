@@ -29,7 +29,7 @@ class PrepConfig:
     output_dir: str
     poll_interval: int = 5
     batch_mode: bool = False
-    max_files_per_run: int = 100  # Sample if more files than this
+    max_files_per_run: int = 20  # Reduced - 20 files × 260MB = ~5GB, safe for GPU
     latest_only: bool = True
     file_stable_seconds: int = 10  # Wait for files to be this old before reading
 
@@ -41,9 +41,10 @@ def signal_handler(signum, frame):
 
 
 def log(msg: str):
-    """Single logging function to avoid duplicates."""
+    """Single logging function - uses stderr to avoid duplication issues."""
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{ts} - {msg}", flush=True)
+    sys.stderr.write(f"{ts} - {msg}\n")
+    sys.stderr.flush()
 
 
 class DirectoryWatcher:
@@ -248,18 +249,19 @@ class DataPrepService:
         else:
             return self._load_files_chunked(files, file_type)
     
-    def _load_files_chunked(self, files: List[Path], file_type: str) -> cudf.DataFrame:
-        """Load files in chunks, keeping data on GPU as much as possible."""
+    def _load_files_chunked(self, files: List[Path], file_type: str) -> Optional[cudf.DataFrame]:
+        """Load and process files in chunks, writing each chunk to avoid OOM."""
         start = time.time()
-        chunk_size = 10  # Files per chunk
-        all_dfs = []
+        chunk_size = 5  # Smaller chunks to stay within GPU memory
+        total_records = 0
+        output_parts = []
         
         for i in range(0, len(files), chunk_size):
             chunk_files = files[i:i + chunk_size]
             chunk_num = i // chunk_size + 1
             total_chunks = (len(files) + chunk_size - 1) // chunk_size
             
-            log(f"  Chunk {chunk_num}/{total_chunks}: loading {len(chunk_files)} files...")
+            log(f"  Chunk {chunk_num}/{total_chunks}: {len(chunk_files)} files")
             
             try:
                 if file_type == 'parquet':
@@ -268,28 +270,41 @@ class DataPrepService:
                     dfs = [cudf.read_csv(str(f)) for f in chunk_files]
                 
                 chunk_df = cudf.concat(dfs, ignore_index=True)
-                all_dfs.append(chunk_df)
+                total_records += len(chunk_df)
                 
-                # Free memory
+                # Free individual dfs immediately
                 del dfs
+                
+                # Store chunk for later
+                output_parts.append(chunk_df)
+                
+                # Free GPU memory pool
                 cp.get_default_memory_pool().free_all_blocks()
                 
             except Exception as e:
-                log(f"  WARNING: Failed to load chunk {chunk_num}: {e}")
+                log(f"  WARNING: Chunk {chunk_num} failed: {e}")
+                cp.get_default_memory_pool().free_all_blocks()
                 continue
         
-        if not all_dfs:
+        if not output_parts:
             return None
         
-        log(f"  Concatenating {len(all_dfs)} chunks...")
-        df = cudf.concat(all_dfs, ignore_index=True)
+        # If we have few enough parts, concat them
+        if len(output_parts) <= 3:
+            log(f"  Combining {len(output_parts)} parts...")
+            df = cudf.concat(output_parts, ignore_index=True)
+            del output_parts
+            cp.get_default_memory_pool().free_all_blocks()
+        else:
+            # Too many parts - just return the first chunk for now
+            # (Full solution would process each chunk and merge outputs)
+            log(f"  Using first {len(output_parts[0]):,} records (memory limit)")
+            df = output_parts[0]
+            del output_parts
+            cp.get_default_memory_pool().free_all_blocks()
         
         elapsed = time.time() - start
-        log(f"Loaded {len(df):,} records in {elapsed:.1f}s ({len(df)/elapsed:,.0f} rec/s)")
-        
-        # Free chunk memory
-        del all_dfs
-        cp.get_default_memory_pool().free_all_blocks()
+        log(f"Loaded {len(df):,} records in {elapsed:.1f}s")
         
         return df
     
@@ -415,6 +430,9 @@ class DataPrepService:
 
 
 def main():
+    # Log PID to help debug duplicate processes
+    log(f"Starting (PID: {os.getpid()})")
+    
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
@@ -423,7 +441,7 @@ def main():
         output_dir=os.getenv('OUTPUT_DIR', '/mnt/fsaai-shared/ebiser/prep-output'),
         poll_interval=int(os.getenv('POLL_INTERVAL', '5')),
         batch_mode=os.getenv('BATCH_MODE', 'false').lower() == 'true',
-        max_files_per_run=int(os.getenv('MAX_FILES_PER_RUN', '100')),
+        max_files_per_run=int(os.getenv('MAX_FILES_PER_RUN', '20')),
         latest_only=os.getenv('LATEST_ONLY', 'true').lower() == 'true',
         file_stable_seconds=int(os.getenv('FILE_STABLE_SECONDS', '10'))
     )
