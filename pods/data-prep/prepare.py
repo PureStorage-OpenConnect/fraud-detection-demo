@@ -120,7 +120,9 @@ class FeatureEngineer:
     def process(self, df: cudf.DataFrame, run_name: str) -> cudf.DataFrame:
         """Apply feature engineering on GPU. Memory-optimized version."""
         start = time.time()
-        log(f"Engineering features for {len(df):,} records...")
+        num_records = len(df)
+        original_cols = len(df.columns)
+        log(f"Feature engineering on {num_records:,} records ({original_cols} columns)...")
         
         # Add metadata - use numeric types to avoid string column size limits
         df['transaction_id'] = cp.arange(len(df), dtype=cp.int64)
@@ -163,7 +165,9 @@ class FeatureEngineer:
                 df[f'{col}_squared'] = df[col] ** 2
         
         elapsed = time.time() - start
-        log(f"Feature engineering complete: {elapsed:.1f}s ({len(df)/elapsed:,.0f} rec/s)")
+        new_cols = len(df.columns) - original_cols
+        throughput = num_records / elapsed if elapsed > 0 else 0
+        log(f"  Added {new_cols} features in {elapsed:.1f}s ({throughput/1e6:.1f}M rec/s)")
         return df
 
 
@@ -242,7 +246,7 @@ class DataPrepService:
             # Sample evenly across the file list
             step = total_files // max_files
             files = files[::step][:max_files]
-            log(f"Sampling {len(files)} of {total_files:,} {file_type} files")
+            log(f"Sampling {len(files)} of {total_files:,} {file_type} files (every {step}th file)")
         else:
             log(f"Loading all {total_files} {file_type} files")
         
@@ -252,39 +256,46 @@ class DataPrepService:
             return self._load_files_chunked(files, file_type)
     
     def _load_files_chunked(self, files: List[Path], file_type: str) -> Optional[cudf.DataFrame]:
-        """Load and process files in chunks, writing each chunk to avoid OOM."""
+        """Load and process files in chunks to avoid OOM."""
         start = time.time()
-        chunk_size = 5  # Smaller chunks to stay within GPU memory
-        total_records = 0
+        batch_size = 5  # Files per batch
+        total_files = len(files)
+        total_batches = (total_files + batch_size - 1) // batch_size
+        running_records = 0
         output_parts = []
         
-        for i in range(0, len(files), chunk_size):
-            chunk_files = files[i:i + chunk_size]
-            chunk_num = i // chunk_size + 1
-            total_chunks = (len(files) + chunk_size - 1) // chunk_size
-            
-            log(f"  Chunk {chunk_num}/{total_chunks}: {len(chunk_files)} files")
+        log(f"  Loading {total_files} files in {total_batches} batches...")
+        
+        for i in range(0, total_files, batch_size):
+            batch_files = files[i:i + batch_size]
+            batch_num = i // batch_size + 1
+            file_start = i + 1
+            file_end = min(i + batch_size, total_files)
             
             try:
                 if file_type == 'parquet':
-                    dfs = [cudf.read_parquet(str(f)) for f in chunk_files]
+                    dfs = [cudf.read_parquet(str(f)) for f in batch_files]
                 else:  # csv
-                    dfs = [cudf.read_csv(str(f)) for f in chunk_files]
+                    dfs = [cudf.read_csv(str(f)) for f in batch_files]
                 
-                chunk_df = cudf.concat(dfs, ignore_index=True)
-                total_records += len(chunk_df)
+                batch_df = cudf.concat(dfs, ignore_index=True)
+                batch_records = len(batch_df)
+                running_records += batch_records
                 
                 # Free individual dfs immediately
                 del dfs
                 
-                # Store chunk for later
-                output_parts.append(chunk_df)
+                # Store batch for later merge
+                output_parts.append(batch_df)
+                
+                # Progress log with running totals
+                log(f"  Batch {batch_num}/{total_batches}: files {file_start}-{file_end} → {batch_records:,} records (total: {running_records:,})")
                 
                 # Free GPU memory pool
                 cp.get_default_memory_pool().free_all_blocks()
                 
             except Exception as e:
-                log(f"  WARNING: Chunk {chunk_num} failed: {e}")
+                log(f"  WARNING: Batch {batch_num} failed: {e}")
                 cp.get_default_memory_pool().free_all_blocks()
                 continue
         
@@ -292,29 +303,27 @@ class DataPrepService:
             return None
         
         # Incrementally concat to avoid memory explosion
-        # Concat pairs until we have one dataframe
-        log(f"  Merging {len(output_parts)} parts...")
-        while len(output_parts) > 1:
-            new_parts = []
-            for i in range(0, len(output_parts), 2):
-                if i + 1 < len(output_parts):
-                    # Concat pair
-                    merged = cudf.concat([output_parts[i], output_parts[i+1]], ignore_index=True)
-                    new_parts.append(merged)
-                else:
-                    # Odd one out, keep as is
-                    new_parts.append(output_parts[i])
-            # Clear old parts and free memory
-            del output_parts
-            cp.get_default_memory_pool().free_all_blocks()
-            output_parts = new_parts
+        if len(output_parts) > 1:
+            log(f"  Merging {len(output_parts)} batches into single DataFrame...")
+            while len(output_parts) > 1:
+                new_parts = []
+                for j in range(0, len(output_parts), 2):
+                    if j + 1 < len(output_parts):
+                        merged = cudf.concat([output_parts[j], output_parts[j+1]], ignore_index=True)
+                        new_parts.append(merged)
+                    else:
+                        new_parts.append(output_parts[j])
+                del output_parts
+                cp.get_default_memory_pool().free_all_blocks()
+                output_parts = new_parts
         
         df = output_parts[0]
         del output_parts
         cp.get_default_memory_pool().free_all_blocks()
         
         elapsed = time.time() - start
-        log(f"Loaded {len(df):,} records in {elapsed:.1f}s")
+        throughput = len(df) / elapsed if elapsed > 0 else 0
+        log(f"  Complete: {len(df):,} records in {elapsed:.1f}s ({throughput/1e6:.1f}M rec/s)")
         
         return df
     
@@ -323,11 +332,16 @@ class DataPrepService:
         start = time.time()
         columns = ['Time'] + [f'V{i}' for i in range(1, 29)] + ['Amount', 'Class']
         
+        log(f"  Loading {len(files)} binary files...")
         arrays = []
-        for f in files:
+        running_records = 0
+        for idx, f in enumerate(files, 1):
             try:
                 data = np.fromfile(str(f), dtype=np.float32).reshape(-1, 31)
+                running_records += len(data)
                 arrays.append(data)
+                if idx % 10 == 0 or idx == len(files):
+                    log(f"  File {idx}/{len(files)}: {running_records:,} records loaded")
             except Exception as e:
                 log(f"  WARNING: Failed to load {f.name}: {e}")
         
@@ -338,29 +352,37 @@ class DataPrepService:
         df = cudf.DataFrame(combined, columns=columns)
         
         elapsed = time.time() - start
-        log(f"Loaded {len(df):,} records in {elapsed:.1f}s")
+        throughput = len(df) / elapsed if elapsed > 0 else 0
+        log(f"  Complete: {len(df):,} records in {elapsed:.1f}s ({throughput/1e6:.1f}M rec/s)")
         return df
     
     def write_output(self, df: cudf.DataFrame, run_name: str):
         """Write processed data to parquet via CPU (avoids GPU OOM on large writes)."""
         output_file = self.output_path / f"features_{run_name}.parquet"
-        log(f"Writing: {output_file.name}")
+        record_count = len(df)
+        log(f"Writing {record_count:,} records to {output_file.name}...")
         
         # Convert to pandas and free GPU memory before writing
-        # This uses host RAM instead of GPU VRAM for the write buffer
-        log(f"  Transferring {len(df):,} records to CPU...")
+        transfer_start = time.time()
+        log(f"  GPU → CPU transfer...")
         pdf = df.to_pandas()
+        transfer_time = time.time() - transfer_start
+        log(f"  Transfer complete: {transfer_time:.1f}s")
         
         # Free GPU memory
         del df
         cp.get_default_memory_pool().free_all_blocks()
         
         # Write from CPU memory (much larger capacity)
+        write_start = time.time()
+        log(f"  Writing parquet (snappy compression)...")
         pdf.to_parquet(str(output_file), compression='snappy', index=False)
+        write_time = time.time() - write_start
         del pdf
         
         size_mb = output_file.stat().st_size / (1024*1024)
-        log(f"Output: {size_mb:.1f} MB")
+        throughput = size_mb / write_time if write_time > 0 else 0
+        log(f"  Write complete: {size_mb:.1f} MB in {write_time:.1f}s ({throughput:.0f} MB/s)")
         
         # Metadata for Pod 3
         pf = pq.ParquetFile(output_file)
@@ -385,6 +407,7 @@ class DataPrepService:
     def process_run(self, run_dir: Path) -> bool:
         """Process a single run directory."""
         run_name = run_dir.name
+        run_start = time.time()
         log("=" * 60)
         log(f"Processing: {run_name}")
         
@@ -407,7 +430,8 @@ class DataPrepService:
             # df already freed in write_output
             cp.get_default_memory_pool().free_all_blocks()
             
-            log(f"SUCCESS: {run_name}")
+            total_time = time.time() - run_start
+            log(f"SUCCESS: {run_name} (total: {total_time:.1f}s)")
             log("=" * 60)
             return True
             
