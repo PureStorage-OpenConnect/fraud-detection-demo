@@ -13,52 +13,38 @@ A containerized fraud detection pipeline demonstrating high-performance AI/ML wo
 This project implements the [NVIDIA Financial Fraud Detection AI Blueprint](https://github.com/NVIDIA-AI-Blueprints/Financial-Fraud-Detection) as a 5-pod containerized architecture, optimized for Pure Storage FlashBlade (high-throughput) and FlashArray (low-latency) storage tiers.
 
 **Key Demonstrations:**
-- Pure Storage appliances for parallel I/O for data generation and feature engineering and low latency model serving
+- Pure Storage FlashBlade parallel I/O for data generation and feature engineering
 - Multi-GPU processing with RAPIDS Dask-cuDF
 - End-to-end ML pipeline from data generation to real-time inference
 
 ## Architecture
 
 ```mermaid
-graph TB
-    subgraph "Data Sources"
-        KAGGLE[Kaggle creditcard.csv<br/>/mnt/datasets/kaggle/creditcardfraud]
-    end
+graph LR
+    A[Pod 1<br/>Data Gather] -->|Parquet Files| B[Pod 2<br/>Data Prep]
+    B -->|Features| C[Pod 3<br/>Model Build]
+    C -->|Models| D[Pod 4<br/>Inference]
+    D -->|Alerts| E[Pod 5<br/>Notification]
     
-    subgraph "Pure Storage FlashBlade"
-        FB_OUT[Generated Data<br/>/mnt/fsaai-shared/ebiser/fraud-data]
-        FB_PREP[Feature Files<br/>/mnt/fsaai-shared/ebiser/prep-output]
-    end
-    
-    subgraph "Pure Storage FlashArray"
-        FA[Model Repository<br/>~/ebiser/nvidia.financial.fraud.detection]
-    end
-    
-    KAGGLE -.->|Schema Template| A[Pod 1<br/>Data Gather<br/>128 Workers]
-    A -->|Parallel Writes| FB_OUT
-    FB_OUT --> B[Pod 2<br/>Data Prep<br/>Multi-GPU Dask-cuDF]
-    B -->|Engineered Features| FB_PREP
-    FB_PREP --> C[Pod 3<br/>Model Build<br/>XGBoost + GNN]
-    C -->|Trained Models| FA
-    FA --> D[Pod 4<br/>Inference<br/>Triton Server]
-    D -->|Fraud Alerts| E[Pod 5<br/>Notification<br/>Flask Webhook]
+    FB[(FlashBlade)] -.-> A
+    FB -.-> B
+    FA[(FlashArray)] -.-> C
+    FA -.-> D
     
     style A fill:#76B900,stroke:#333,stroke-width:2px,color:#fff
     style B fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style C fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style D fill:#d85e00,stroke:#333,stroke-width:2px,color:#fff
     style E fill:#1a5490,stroke:#333,stroke-width:2px,color:#fff
-    style KAGGLE fill:#1a5490,stroke:#333,stroke-width:2px,color:#fff
-    style FB_OUT fill:#FF6600,stroke:#333,stroke-width:2px,color:#fff
-    style FB_PREP fill:#FF6600,stroke:#333,stroke-width:2px,color:#fff
+    style FB fill:#FF6600,stroke:#333,stroke-width:2px,color:#fff
     style FA fill:#FF6600,stroke:#333,stroke-width:2px,color:#fff
 ```
 
 **Color Legend:**
-- 🟢 **Green**: CPU-only pods
-- 🟠 **Orange**: GPU-accelerated pods
+- 🟢 **Green**: CPU pod
+- 🟠 **Orange**: GPU-accelerated pods  
 - 🔵 **Blue**: Support services
-- 🟧 **Pure Orange**: Pure Storage FA/FB
+- 🟧 **Pure Orange**: Pure Storage
 
 ## Pods
 
@@ -74,10 +60,10 @@ graph TB
 
 This demo showcases Pure Storage tiered storage for AI/ML workloads:
 
-| Storage Tier | Product | Use Case | Mount Point |
-|--------------|---------|----------|-------------|
-| High-Throughput | FlashBlade | Data generation, feature files | `/mnt/fsaai-shared/` |
-| Low-Latency | FlashArray | Model repository, inference | `~/ebiser/nvidia.financial.fraud.detection/` |
+| Storage Tier | Product | Use Case |
+|--------------|---------|----------|
+| High-Throughput | FlashBlade | Data generation, feature files |
+| Low-Latency | FlashArray | Model repository, inference |
 
 ### Data Flow
 
