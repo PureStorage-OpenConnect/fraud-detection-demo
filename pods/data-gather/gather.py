@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Pod 1: Data Gather Service"""
+"""Pod 1: Data Gather Service - CPU-based parallel data generator"""
 
 import os
 import sys
-
-# Redirect stderr to /dev/null at fd level to prevent Docker duplicate capture
-sys.stderr = open(os.devnull, 'w')
-os.dup2(sys.stdout.fileno(), 2)
-
 import time
 import signal
 import subprocess

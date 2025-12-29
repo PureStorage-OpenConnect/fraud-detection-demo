@@ -3,10 +3,6 @@
 
 import os
 import sys
-
-# Redirect stderr to stdout at fd level to prevent Docker duplicate capture
-os.dup2(sys.stdout.fileno(), 2)
-
 import time
 import json
 import signal
@@ -59,6 +55,38 @@ class Config:
     latest_only: bool = True
     file_stable_seconds: int = 10
     use_multi_gpu: bool = True
+
+
+def engineer_features_partition(df):
+    """Feature engineering function to run on each GPU partition."""
+    import cupy as cp
+    
+    # Scale PCA columns
+    for i in range(1, 29):
+        col = f'V{i}'
+        if col in df.columns:
+            mean, std = float(df[col].mean()), float(df[col].std())
+            if std > 0.001:
+                df[col] = (df[col] - mean) / std
+    
+    if 'Amount' in df.columns:
+        df['amount_log'] = cp.log1p(df['Amount'].values)
+        mean, std = float(df['Amount'].mean()), float(df['Amount'].std())
+        if std > 0.001:
+            df['amount_scaled'] = (df['Amount'] - mean) / std
+    
+    if 'Time' in df.columns:
+        df['hour_of_day'] = (df['Time'] / 3600) % 24
+        df['is_night'] = ((df['hour_of_day'] >= 22) | (df['hour_of_day'] <= 6)).astype('int8')
+    
+    if 'V1' in df.columns and 'V2' in df.columns:
+        df['V1_V2_interaction'] = df['V1'] * df['V2']
+    
+    for col in ['V1', 'V14', 'V17']:
+        if col in df.columns:
+            df[f'{col}_squared'] = df[col] ** 2
+    
+    return df
 
 
 class DataPrepService:
@@ -120,7 +148,7 @@ class DataPrepService:
                 n_workers=self.gpu_count, threads_per_worker=1,
                 memory_limit='60GB', device_memory_limit='40GB',
                 rmm_managed_memory=True, silence_logs=50)
-            self.dask_client = Client(self.dask_cluster, set_as_default=False)
+            self.dask_client = Client(self.dask_cluster, set_as_default=True)
             self.dask_client.wait_for_workers(self.gpu_count, timeout=30)
             self.multi_gpu = True
             log(f"  Dask ready: {self.dask_client.dashboard_link}")
@@ -154,9 +182,94 @@ class DataPrepService:
         runs = sorted(runs, key=lambda x: x.name)
         return [runs[-1]] if self.config.latest_only and runs else runs
     
-    def load_data(self, run_dir: Path) -> Optional[cudf.DataFrame]:
+    def process_multi_gpu(self, run_dir: Path, run_name: str) -> bool:
+        """Process using Dask across multiple GPUs."""
         now = time.time()
         files = sorted([f for f in run_dir.glob("worker_*.parquet") if now - f.stat().st_mtime >= 5])
+        
+        if not files:
+            log("No stable parquet files found")
+            return False
+        
+        # Sample if needed
+        if len(files) > self.config.max_files:
+            step = len(files) // self.config.max_files
+            files = files[::step][:self.config.max_files]
+            log(f"Sampling {len(files)} files (every {step}th)")
+        else:
+            log(f"Loading {len(files)} files")
+        
+        file_paths = [str(f) for f in files]
+        
+        try:
+            # Load distributed across GPUs
+            start = time.time()
+            log(f"  [{', '.join(self.gpu_names)}] Loading data...")
+            
+            ddf = dask_cudf.read_parquet(file_paths, split_row_groups=True)
+            
+            # Repartition to ensure work is split across GPUs
+            n_partitions = self.gpu_count * 4
+            ddf = ddf.repartition(npartitions=n_partitions)
+            
+            # Persist to distribute across GPUs
+            ddf = ddf.persist()
+            wait(ddf)
+            
+            total_rows = len(ddf)
+            load_time = time.time() - start
+            log(f"  [{', '.join(self.gpu_names)}] Loaded {total_rows:,} records in {load_time:.1f}s")
+            
+            # Feature engineering on each partition (runs on whichever GPU holds that partition)
+            start = time.time()
+            log(f"  [{', '.join(self.gpu_names)}] Feature engineering...")
+            
+            ddf['prep_timestamp'] = float(time.time())
+            
+            # Apply feature engineering to each partition
+            meta = ddf._meta.copy()
+            for col in ['amount_log', 'amount_scaled', 'hour_of_day', 'is_night', 
+                        'V1_V2_interaction', 'V1_squared', 'V14_squared', 'V17_squared']:
+                meta[col] = 0.0
+            meta['is_night'] = np.int8(0)
+            
+            ddf = ddf.map_partitions(engineer_features_partition, meta=meta)
+            ddf = ddf.persist()
+            wait(ddf)
+            
+            eng_time = time.time() - start
+            log(f"  [{', '.join(self.gpu_names)}] Features added in {eng_time:.1f}s")
+            
+            # Compute to single DataFrame for writing
+            start = time.time()
+            log(f"  Merging partitions...")
+            df = ddf.compute()
+            
+            # Add transaction IDs
+            df['transaction_id'] = cp.arange(len(df), dtype=cp.int64)
+            
+            merge_time = time.time() - start
+            log(f"  Merged {len(df):,} records in {merge_time:.1f}s")
+            
+            # Write output
+            self._write_output(df, run_name)
+            
+            del df, ddf
+            cp.get_default_memory_pool().free_all_blocks()
+            
+            return True
+            
+        except Exception as e:
+            log(f"  Multi-GPU failed: {e}")
+            log(f"  Falling back to single GPU...")
+            cp.get_default_memory_pool().free_all_blocks()
+            return self.process_single_gpu(run_dir, run_name)
+    
+    def process_single_gpu(self, run_dir: Path, run_name: str) -> bool:
+        """Fallback single-GPU processing."""
+        now = time.time()
+        files = sorted([f for f in run_dir.glob("worker_*.parquet") if now - f.stat().st_mtime >= 5])
+        
         if not files:
             files = sorted([f for f in run_dir.glob("worker_*.csv") if now - f.stat().st_mtime >= 5])
             file_type = 'csv'
@@ -164,9 +277,8 @@ class DataPrepService:
             file_type = 'parquet'
         
         if not files:
-            return None
+            return False
         
-        # Sample if too many
         if len(files) > self.config.max_files:
             step = len(files) // self.config.max_files
             files = files[::step][:self.config.max_files]
@@ -174,13 +286,13 @@ class DataPrepService:
         else:
             log(f"Loading {len(files)} {file_type} files")
         
-        start = time.time()
         gpu_id = cp.cuda.runtime.getDevice()
         gpu_name = self.gpu_names[gpu_id] if gpu_id < len(self.gpu_names) else f"GPU{gpu_id}"
         
-        # Load in batches
+        start = time.time()
         parts = []
         batch_size = 5
+        
         for i in range(0, len(files), batch_size):
             batch = files[i:i+batch_size]
             try:
@@ -196,7 +308,7 @@ class DataPrepService:
                 log(f"  [{gpu_name}] Batch failed: {e}")
         
         if not parts:
-            return None
+            return False
         
         # Merge
         while len(parts) > 1:
@@ -211,46 +323,23 @@ class DataPrepService:
             parts = new_parts
         
         df = parts[0]
-        elapsed = time.time() - start
-        log(f"  [{gpu_name}] Loaded {len(df):,} records in {elapsed:.1f}s")
-        return df
-    
-    def engineer_features(self, df: cudf.DataFrame) -> cudf.DataFrame:
-        start = time.time()
-        orig_cols = len(df.columns)
+        del parts
+        log(f"  [{gpu_name}] Loaded {len(df):,} records in {time.time()-start:.1f}s")
         
+        # Feature engineering
+        start = time.time()
         df['transaction_id'] = cp.arange(len(df), dtype=cp.int64)
         df['prep_timestamp'] = float(time.time())
+        df = engineer_features_partition(df)
+        log(f"  [{gpu_name}] Features added in {time.time()-start:.1f}s")
         
-        # Scale PCA columns
-        for i in range(1, 29):
-            col = f'V{i}'
-            if col in df.columns:
-                mean, std = float(df[col].mean()), float(df[col].std())
-                if std > 0.001:
-                    df[col] = (df[col] - mean) / std
+        self._write_output(df, run_name)
         
-        if 'Amount' in df.columns:
-            df['amount_log'] = cp.log1p(df['Amount'].values)
-            mean, std = float(df['Amount'].mean()), float(df['Amount'].std())
-            if std > 0.001:
-                df['amount_scaled'] = (df['Amount'] - mean) / std
-        
-        if 'Time' in df.columns:
-            df['hour_of_day'] = (df['Time'] / 3600) % 24
-            df['is_night'] = ((df['hour_of_day'] >= 22) | (df['hour_of_day'] <= 6)).astype('int8')
-        
-        if 'V1' in df.columns and 'V2' in df.columns:
-            df['V1_V2_interaction'] = df['V1'] * df['V2']
-        
-        for col in ['V1', 'V14', 'V17']:
-            if col in df.columns:
-                df[f'{col}_squared'] = df[col] ** 2
-        
-        log(f"  Added {len(df.columns) - orig_cols} features in {time.time()-start:.1f}s")
-        return df
+        del df
+        cp.get_default_memory_pool().free_all_blocks()
+        return True
     
-    def write_output(self, df: cudf.DataFrame, run_name: str):
+    def _write_output(self, df: cudf.DataFrame, run_name: str):
         output_file = self.output_path / f"features_{run_name}.parquet"
         log(f"Writing {len(df):,} records...")
         
@@ -282,20 +371,18 @@ class DataPrepService:
         log(f"Processing: {run_name}")
         
         try:
-            df = self.load_data(run_dir)
-            if df is None or len(df) == 0:
-                log(f"No data in {run_name}")
-                return False
+            if self.multi_gpu:
+                success = self.process_multi_gpu(run_dir, run_name)
+            else:
+                success = self.process_single_gpu(run_dir, run_name)
             
-            df = self.engineer_features(df)
-            self.write_output(df, run_name)
-            self.processed.add(run_name)
-            self._save_state()
-            cp.get_default_memory_pool().free_all_blocks()
+            if success:
+                self.processed.add(run_name)
+                self._save_state()
+                log(f"SUCCESS: {run_name} ({time.time()-start:.1f}s)")
+                log("=" * 60)
+            return success
             
-            log(f"SUCCESS: {run_name} ({time.time()-start:.1f}s)")
-            log("=" * 60)
-            return True
         except Exception as e:
             log(f"ERROR: {e}")
             import traceback
