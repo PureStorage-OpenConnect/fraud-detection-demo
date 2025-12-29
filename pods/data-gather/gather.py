@@ -5,19 +5,6 @@ Pod 1: Data Gather Service
 High-performance synthetic transaction data generator for the Financial Fraud
 Detection demo. Generates realistic credit card transaction data at scale
 using Pure Storage FlashBlade for high-throughput parallel writes.
-
-This service demonstrates:
-- Pure Storage FlashBlade parallel I/O capabilities
-- Scalable data generation for ML training pipelines
-- Schema-based synthetic data matching Kaggle creditcard.csv format
-
-Features:
-- Parallel worker processes (avoids Python GIL)
-- Schema-based generation from Kaggle creditcard.csv template
-- Timestamped output directories for run tracking
-- Real-time throughput monitoring
-- Configurable runtime duration (default: 5 minutes)
-- Multiple output formats: Parquet, CSV, or raw binary
 """
 
 import os
@@ -27,7 +14,7 @@ import signal
 import subprocess
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict
 
 import pandas as pd
 import numpy as np
@@ -37,9 +24,10 @@ STOP_FLAG = False
 
 
 def log(msg: str):
-    """Simple timestamped logging to stdout"""
+    """Simple timestamped logging to stdout only"""
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{ts} - {msg}", flush=True)
+    sys.stdout.write(f"{ts} - {msg}\n")
+    sys.stdout.flush()
 
 
 def load_schema(template_path: Path) -> Dict:
@@ -118,8 +106,8 @@ def run_data_generation(
     
     log(f"Starting {num_workers} worker processes...")
     
-    # Worker script optimized for throughput
-    worker_script = f'''
+    # Worker script - completely silent, no stdout/stderr
+    worker_script = '''
 import sys
 import json
 import time
@@ -128,8 +116,7 @@ import pandas as pd
 from pathlib import Path
 
 def generate_data_fast(columns, stats, num_rows, rng):
-    """Optimized data generation using pre-allocated arrays"""
-    data = {{}}
+    data = {}
     for col in columns:
         if col in stats:
             if col == 'Class':
@@ -165,29 +152,27 @@ if output_format == 'parquet':
     
     while (time.time() - start_time) < duration:
         chunk = generate_data_fast(columns, stats, chunk_size, rng)
-        file_path = Path(output_dir) / f"worker_{{worker_id:03d}}_{{file_counter:05d}}.parquet"
+        file_path = Path(output_dir) / f"worker_{worker_id:03d}_{file_counter:05d}.parquet"
         table = pa.Table.from_pandas(chunk, preserve_index=False)
-        pq.write_table(table, file_path, compression=None)  # No compression for speed
+        pq.write_table(table, file_path, compression=None)
         file_counter += 1
 
 elif output_format == 'binary':
-    # Raw binary numpy arrays - maximum speed
     while (time.time() - start_time) < duration:
-        # Generate raw float32 array (31 columns x chunk_size rows)
         data = rng.standard_normal((chunk_size, 31)).astype(np.float32)
-        file_path = Path(output_dir) / f"worker_{{worker_id:03d}}_{{file_counter:05d}}.bin"
+        file_path = Path(output_dir) / f"worker_{worker_id:03d}_{file_counter:05d}.bin"
         data.tofile(file_path)
         file_counter += 1
 
-else:  # csv
+else:
     while (time.time() - start_time) < duration:
         chunk = generate_data_fast(columns, stats, chunk_size, rng)
-        file_path = Path(output_dir) / f"worker_{{worker_id:03d}}_{{file_counter:05d}}.csv"
+        file_path = Path(output_dir) / f"worker_{worker_id:03d}_{file_counter:05d}.csv"
         chunk.to_csv(file_path, index=False)
         file_counter += 1
 '''
     
-    # Launch all workers
+    # Launch all workers with completely silenced output
     processes = []
     for worker_id in range(num_workers):
         p = subprocess.Popen(
@@ -195,7 +180,8 @@ else:  # csv
              str(worker_id), str(output_path), str(chunk_size), 
              str(duration_seconds), str(schema_file), output_format],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE
+            stderr=subprocess.DEVNULL,  # Silence stderr to prevent output mixing
+            stdin=subprocess.DEVNULL
         )
         processes.append(p)
     
@@ -205,10 +191,10 @@ else:  # csv
     # Determine file pattern based on format
     if output_format == 'parquet':
         file_pattern = "worker_*.parquet"
-        bytes_per_row = 130  # Approximate for parquet
+        bytes_per_row = 130
     elif output_format == 'binary':
         file_pattern = "worker_*.bin"
-        bytes_per_row = 31 * 4  # 31 float32 columns
+        bytes_per_row = 31 * 4
     else:
         file_pattern = "worker_*.csv"
         bytes_per_row = 200
@@ -241,7 +227,6 @@ else:  # csv
             est_records = current_bytes // bytes_per_row
             rps = (interval_bytes // bytes_per_row) / interval_time if interval_time > 0 else 0
             
-            # Color code based on throughput
             speed_str = f"{mbps:6.1f} MB/s"
             if mbps >= 1000:
                 speed_str = f"{gbps:5.2f} GB/s"
@@ -263,24 +248,19 @@ else:  # csv
         if p.poll() is None:
             p.terminate()
     
+    # Wait for workers to finish
+    failed_workers = 0
     for p in processes:
         try:
             p.wait(timeout=5)
+            if p.returncode and p.returncode != 0:
+                failed_workers += 1
         except subprocess.TimeoutExpired:
             p.kill()
+            failed_workers += 1
     
-    # Check for worker errors
-    errors = []
-    for i, p in enumerate(processes):
-        if p.returncode and p.returncode != 0:
-            stderr = p.stderr.read().decode() if p.stderr else ""
-            if stderr:
-                errors.append(f"Worker {i}: {stderr[:200]}")
-    
-    if errors:
-        log(f"WARNING: {len(errors)} workers had errors")
-        for err in errors[:3]:
-            log(f"  {err}")
+    if failed_workers > 0:
+        log(f"WARNING: {failed_workers} workers exited with errors")
     
     # Final report
     total_elapsed = time.time() - start_time
@@ -318,8 +298,8 @@ def main():
     output_dir = os.getenv('OUTPUT_DIR', '/mnt/fsaai-shared/ebiser/fraud-data')
     num_workers = int(os.getenv('NUM_WORKERS', '128'))
     duration_seconds = int(os.getenv('DURATION_SECONDS', '300'))
-    chunk_size = int(os.getenv('CHUNK_SIZE', '2000000'))  # 2M rows = ~30 files/worker over 5min
-    output_format = os.getenv('OUTPUT_FORMAT', 'parquet')  # parquet, csv, or binary
+    chunk_size = int(os.getenv('CHUNK_SIZE', '2000000'))
+    output_format = os.getenv('OUTPUT_FORMAT', 'parquet')
     
     template_path = Path(template_dir) / template_file
     output_base = Path(output_dir)
