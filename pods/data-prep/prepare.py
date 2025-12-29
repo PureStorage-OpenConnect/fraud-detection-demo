@@ -25,7 +25,11 @@ import numpy as np
 import pyarrow.parquet as pq
 
 import dask
-dask.config.set({'distributed.logging.distributed': 'critical'})
+dask.config.set({
+    'distributed.logging.distributed': 'critical',
+    'distributed.scheduler.work-stealing': False,  # Reduce CPU polling
+    'distributed.scheduler.bandwidth': 100000000,
+})
 import dask_cudf
 from dask.distributed import Client, wait
 from dask_cuda import LocalCUDACluster
@@ -115,14 +119,17 @@ class DataPrepService:
             self.gpu_names = ["GPU0"]
         
         if config.use_multi_gpu and self.gpu_count > 1:
-            self._init_dask()
+            self.multi_gpu_available = True
+            log(f"  Multi-GPU available (will init Dask on first job)")
+        else:
+            self.multi_gpu_available = False
         
         log("=" * 60)
         log("Pod 2: Data Prep Service (RAPIDS)")
         log("=" * 60)
         log(f"Input:  {self.input_path}")
         log(f"Output: {self.output_path}")
-        log(f"Mode:   {'multi-GPU via Dask' if self.multi_gpu else 'single GPU'}")
+        log(f"Mode:   {'multi-GPU available' if self.multi_gpu_available else 'single GPU'}")
         log("=" * 60)
     
     def _load_state(self) -> Set[str]:
@@ -371,6 +378,10 @@ class DataPrepService:
         log(f"Processing: {run_name}")
         
         try:
+            # Lazy init Dask on first job
+            if self.multi_gpu_available and not self.multi_gpu:
+                self._init_dask()
+            
             if self.multi_gpu:
                 success = self.process_multi_gpu(run_dir, run_name)
             else:
@@ -401,6 +412,7 @@ class DataPrepService:
             log("Watching for new runs...")
             last_status = time.time()
             processed_count = 0
+            idle_poll = 10  # Longer sleep when idle to reduce CPU
             
             while not STOP_FLAG:
                 runs = self.get_new_runs()
@@ -410,12 +422,12 @@ class DataPrepService:
                         if self.process_run(run_dir):
                             processed_count += 1
                     last_status = time.time()
-                elif time.time() - last_status >= 30:
+                elif time.time() - last_status >= 60:
                     log(f"Waiting for data... ({processed_count} processed)")
                     last_status = time.time()
                 
                 if not STOP_FLAG:
-                    time.sleep(self.config.poll_interval)
+                    time.sleep(idle_poll)
             
             log("Stopped")
 
