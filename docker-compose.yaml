@@ -57,8 +57,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    depends_on:
-      - data-gather
     networks:
       - fraud-detection
 
