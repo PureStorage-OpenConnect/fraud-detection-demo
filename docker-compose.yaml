@@ -1,8 +1,10 @@
 services:
   # Pod 1: Data Gather - Financial Fraud Data Generator
-  data-gather:
+data-gather:
     build: ./pods/data-gather
     container_name: fraud-detection-gather
+    tty: false
+    stdin_open: false
     volumes:
       # Input: Kaggle creditcard.csv template (read-only)
       - ${TEMPLATE_MOUNT:-/mnt/datasets/kaggle/creditcardfraud}:/mnt/datasets/kaggle/creditcardfraud:ro
@@ -36,9 +38,11 @@ services:
       - fraud-detection
 
   # Pod 2: Data Prep (Multi-GPU) - RAPIDS Dask-cuDF
-  data-prep:
+data-prep:
     build: ./pods/data-prep
     container_name: fraud-detection-prep
+    tty: false
+    stdin_open: false
     volumes:
       - ${FB_OUTPUT_MOUNT:-/mnt/fsaai-shared/ebiser/fraud-data}:/mnt/fsaai-shared/ebiser/fraud-data:ro
       - ${FB_MOUNT:-/mnt/fsaai-shared/ebiser}:/mnt/fsaai-shared/ebiser
