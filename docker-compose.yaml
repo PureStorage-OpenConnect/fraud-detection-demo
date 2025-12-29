@@ -1,27 +1,21 @@
 services:
   # Pod 1: Data Gather - Financial Fraud Data Generator
-data-gather:
+  data-gather:
     build: ./pods/data-gather
     container_name: fraud-detection-gather
     tty: false
     stdin_open: false
     volumes:
-      # Input: Kaggle creditcard.csv template (read-only)
       - ${TEMPLATE_MOUNT:-/mnt/datasets/kaggle/creditcardfraud}:/mnt/datasets/kaggle/creditcardfraud:ro
-      # Output: FlashBlade high-throughput storage (read/write)
       - ${FB_OUTPUT_MOUNT:-/mnt/fsaai-shared/ebiser/fraud-data}:/mnt/fsaai-shared/ebiser/fraud-data
     environment:
-      # Template configuration
       - TEMPLATE_DIR=/mnt/datasets/kaggle/creditcardfraud
       - TEMPLATE_FILE=creditcard.csv
-      # Output configuration
       - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
-      # Performance tuning
       - NUM_WORKERS=${NUM_WORKERS:-128}
       - DURATION_SECONDS=${DURATION_SECONDS:-300}
       - CHUNK_SIZE=${CHUNK_SIZE:-2000000}
       - OUTPUT_FORMAT=${OUTPUT_FORMAT:-parquet}
-    # Resource allocation for high-thread workloads
     deploy:
       resources:
         limits:
@@ -38,7 +32,7 @@ data-gather:
       - fraud-detection
 
   # Pod 2: Data Prep (Multi-GPU) - RAPIDS Dask-cuDF
-data-prep:
+  data-prep:
     build: ./pods/data-prep
     container_name: fraud-detection-prep
     tty: false
@@ -55,7 +49,7 @@ data-prep:
       - LATEST_ONLY=${LATEST_ONLY:-true}
       - FILE_STABLE_SECONDS=${FILE_STABLE_SECONDS:-10}
       - USE_MULTI_GPU=${USE_MULTI_GPU:-true}
-    shm_size: '16gb'  # Shared memory for Dask workers
+    shm_size: '16gb'
     deploy:
       resources:
         reservations:
@@ -72,6 +66,8 @@ data-prep:
   model-build:
     build: ./pods/model-build
     container_name: fraud-detection-build
+    tty: false
+    stdin_open: false
     volumes:
       - ${FB_MOUNT:-/mnt/fsaai-shared/ebiser}:/mnt/fsaai-shared/ebiser
       - fa-storage:/root/ebiser/nvidia.financial.fraud.detection
@@ -99,10 +95,12 @@ data-prep:
   inference:
     build: ./pods/inference
     container_name: fraud-detection-inference
+    tty: false
+    stdin_open: false
     ports:
-      - "8000:8000"  # HTTP
-      - "8001:8001"  # gRPC
-      - "8002:8002"  # Metrics
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
     volumes:
       - fa-storage:/root/ebiser/nvidia.financial.fraud.detection
     environment:
@@ -131,6 +129,8 @@ data-prep:
   notification:
     build: ./pods/notification
     container_name: fraud-detection-notification
+    tty: false
+    stdin_open: false
     ports:
       - "5000:5000"
     environment:
