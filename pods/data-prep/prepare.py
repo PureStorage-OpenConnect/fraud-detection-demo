@@ -1,65 +1,63 @@
 #!/usr/bin/env python3
 """
 Pod 2: Data Prepare Service (Multi-GPU RAPIDS)
-===============================================
-GPU-accelerated feature engineering using RAPIDS cuDF with Dask
-for multi-GPU parallelism.
 """
 
-# CRITICAL: Set multiprocessing start method BEFORE any other imports
-# This prevents fork-related duplicate output issues
-import multiprocessing
-try:
-    multiprocessing.set_start_method('spawn', force=True)
-except RuntimeError:
-    pass  # Already set
-
-# Silence all distributed/dask logging before imports
 import os
-import logging
-
-# Suppress Dask distributed logging completely
-logging.getLogger('distributed').setLevel(logging.CRITICAL)
-logging.getLogger('distributed.worker').setLevel(logging.CRITICAL)
-logging.getLogger('distributed.scheduler').setLevel(logging.CRITICAL)
-logging.getLogger('distributed.nanny').setLevel(logging.CRITICAL)
-logging.getLogger('distributed.comm').setLevel(logging.CRITICAL)
-logging.getLogger('bokeh').setLevel(logging.CRITICAL)
-logging.getLogger('tornado').setLevel(logging.CRITICAL)
-logging.getLogger('asyncio').setLevel(logging.CRITICAL)
-
-# Environment variables to suppress library logging (set before imports)
-os.environ['DASK_DISTRIBUTED__LOGGING__DISTRIBUTED'] = 'critical'
-os.environ['DASK_DISTRIBUTED__WORKER__DAEMON'] = 'False'
-os.environ['RAPIDS_NO_INITIALIZE'] = '1'
-os.environ['CUDF_LOGGING_LEVEL'] = 'CRITICAL'
-
 import sys
 import time
 import json
 import signal
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Set
 from dataclasses import dataclass
+
+# Suppress all third-party logging BEFORE imports
+for name in ['distributed', 'distributed.worker', 'distributed.scheduler', 
+             'distributed.nanny', 'distributed.comm', 'bokeh', 'tornado', 'asyncio']:
+    logging.getLogger(name).setLevel(logging.CRITICAL)
+
+os.environ['DASK_DISTRIBUTED__LOGGING__DISTRIBUTED'] = 'critical'
+os.environ['RAPIDS_NO_INITIALIZE'] = '1'
+os.environ['CUDF_LOGGING_LEVEL'] = 'CRITICAL'
 
 import cudf
 import cupy as cp
 import numpy as np
 import pyarrow.parquet as pq
 
-# Dask imports (after logging config)
 import dask
 dask.config.set({'distributed.logging.distributed': 'critical'})
-dask.config.set({'distributed.worker.daemon': False})
 
 import dask_cudf
 from dask.distributed import Client, wait
 from dask_cuda import LocalCUDACluster
 
+# Configure single logger for main process only
+MAIN_PID = os.getpid()
+logger = logging.getLogger('prep')
+logger.setLevel(logging.INFO)
+logger.handlers.clear()
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+logger.addHandler(handler)
+logger.propagate = False
+
 STOP_FLAG = False
-DASK_CLIENT = None
-DASK_CLUSTER = None
+
+
+def log(msg: str):
+    """Only log from main process."""
+    if os.getpid() == MAIN_PID:
+        logger.info(msg)
+
+
+def signal_handler(signum, frame):
+    global STOP_FLAG
+    log("Received shutdown signal")
+    STOP_FLAG = True
 
 
 @dataclass
@@ -74,22 +72,7 @@ class PrepConfig:
     use_multi_gpu: bool = True
 
 
-def signal_handler(signum, frame):
-    global STOP_FLAG
-    log(f"Received shutdown signal")
-    STOP_FLAG = True
-
-
-def log(msg: str):
-    """Single logging function - stdout only, no duplicates."""
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    sys.stdout.write(f"{ts} - {msg}\n")
-    sys.stdout.flush()
-
-
 class DirectoryWatcher:
-    """Watch for new run directories from Pod 1."""
-    
     def __init__(self, watch_dir: Path, state_dir: Path):
         self.watch_dir = watch_dir
         self.state_file = state_dir / ".prep_state.json"
@@ -112,7 +95,6 @@ class DirectoryWatcher:
             log(f"WARNING: Could not save state: {e}")
     
     def get_new_runs(self, latest_only: bool = False, min_age_seconds: int = 10) -> List[Path]:
-        """Get unprocessed run directories that are stable."""
         if not self.watch_dir.exists():
             return []
         
@@ -123,25 +105,18 @@ class DirectoryWatcher:
             if entry.is_dir() and entry.name.startswith("run_"):
                 if entry.name not in self.processed_dirs:
                     try:
-                        mtime = entry.stat().st_mtime
-                        age = now - mtime
-                        if age < min_age_seconds:
+                        if now - entry.stat().st_mtime < min_age_seconds:
                             continue
                     except:
                         continue
                     
-                    has_files = (list(entry.glob("worker_*.parquet"))[:1] or 
-                                 list(entry.glob("worker_*.csv"))[:1] or
-                                 list(entry.glob("worker_*.bin"))[:1])
-                    if has_files:
+                    if (list(entry.glob("worker_*.parquet"))[:1] or 
+                        list(entry.glob("worker_*.csv"))[:1] or
+                        list(entry.glob("worker_*.bin"))[:1]):
                         new_runs.append(entry)
         
         new_runs = sorted(new_runs, key=lambda x: x.name)
-        
-        if latest_only and new_runs:
-            return [new_runs[-1]]
-        
-        return new_runs
+        return [new_runs[-1]] if latest_only and new_runs else new_runs
     
     def mark_processed(self, run_dir: Path):
         self.processed_dirs.add(run_dir.name)
@@ -149,12 +124,9 @@ class DirectoryWatcher:
 
 
 class FeatureEngineer:
-    """GPU-accelerated feature engineering using RAPIDS cuDF."""
-    
     PCA_COLS = [f"V{i}" for i in range(1, 29)]
     
     def process(self, df: cudf.DataFrame, run_name: str) -> cudf.DataFrame:
-        """Apply feature engineering on GPU."""
         start = time.time()
         num_records = len(df)
         original_cols = len(df.columns)
@@ -165,15 +137,13 @@ class FeatureEngineer:
         
         for col in self.PCA_COLS:
             if col in df.columns:
-                mean_val = float(df[col].mean())
-                std_val = float(df[col].std())
+                mean_val, std_val = float(df[col].mean()), float(df[col].std())
                 if std_val > 0.001:
                     df[col] = (df[col] - mean_val) / std_val
         
         if 'Amount' in df.columns:
             df['amount_log'] = cp.log1p(df['Amount'].values)
-            amount_mean = float(df['Amount'].mean())
-            amount_std = float(df['Amount'].std())
+            amount_mean, amount_std = float(df['Amount'].mean()), float(df['Amount'].std())
             if amount_std > 0.001:
                 df['amount_scaled'] = (df['Amount'] - amount_mean) / amount_std
         
@@ -192,9 +162,7 @@ class FeatureEngineer:
                 df[f'{col}_squared'] = df[col] ** 2
         
         elapsed = time.time() - start
-        new_cols = len(df.columns) - original_cols
-        throughput = num_records / elapsed if elapsed > 0 else 0
-        log(f"  Added {new_cols} features in {elapsed:.1f}s ({throughput/1e6:.1f}M rec/s)")
+        log(f"  Added {len(df.columns) - original_cols} features in {elapsed:.1f}s ({num_records/elapsed/1e6:.1f}M rec/s)")
         return df
 
 
@@ -211,17 +179,22 @@ class DataPrepService:
         self.dask_cluster = None
         self.gpu_count = 1
         self.multi_gpu_enabled = False
+        self.gpu_names = []
         
         # Check GPU availability
         try:
             self.gpu_count = cp.cuda.runtime.getDeviceCount()
-            gpu_name = cp.cuda.runtime.getDeviceProperties(0)['name'].decode()
-            gpu_mem = cp.cuda.runtime.getDeviceProperties(0)['totalGlobalMem'] / (1024**3)
-            log(f"GPU: {self.gpu_count}x {gpu_name} ({gpu_mem:.0f}GB each)")
+            for i in range(self.gpu_count):
+                props = cp.cuda.runtime.getDeviceProperties(i)
+                name = props['name'].decode()
+                mem_gb = props['totalGlobalMem'] / (1024**3)
+                self.gpu_names.append(f"GPU{i}:{name[:12]}")
+            log(f"GPUs: {self.gpu_count}x detected")
+            for i, name in enumerate(self.gpu_names):
+                log(f"  [{i}] {name}")
         except Exception as e:
             log(f"WARNING: GPU check failed: {e}")
         
-        # Initialize Dask for multi-GPU if available
         if config.use_multi_gpu and self.gpu_count > 1:
             self._init_dask_cluster()
         
@@ -237,29 +210,23 @@ class DataPrepService:
         if self.multi_gpu_enabled:
             log(f"Multi-GPU:   ENABLED ({self.gpu_count} GPUs via Dask)")
         else:
-            log(f"Multi-GPU:   disabled (using single GPU)")
+            log(f"Multi-GPU:   disabled (single GPU mode)")
         log("=" * 60)
     
     def _init_dask_cluster(self):
-        """Initialize Dask LocalCUDACluster for multi-GPU processing."""
-        global DASK_CLIENT, DASK_CLUSTER
         try:
             log(f"Initializing Dask cluster with {self.gpu_count} GPUs...")
             
-            # Create cluster with silenced logging
             self.dask_cluster = LocalCUDACluster(
                 n_workers=self.gpu_count,
                 threads_per_worker=1,
                 memory_limit='60GB',
                 device_memory_limit='40GB',
                 rmm_managed_memory=True,
-                silence_logs=logging.CRITICAL,  # Silence worker logs
+                silence_logs=logging.CRITICAL,
             )
             
             self.dask_client = Client(self.dask_cluster, set_as_default=False)
-            DASK_CLIENT = self.dask_client
-            DASK_CLUSTER = self.dask_cluster
-            
             self.dask_client.wait_for_workers(self.gpu_count, timeout=30)
             
             self.multi_gpu_enabled = True
@@ -272,8 +239,6 @@ class DataPrepService:
             self._cleanup_dask()
     
     def _cleanup_dask(self):
-        """Clean up Dask resources."""
-        global DASK_CLIENT, DASK_CLUSTER
         try:
             if self.dask_client:
                 self.dask_client.close()
@@ -283,45 +248,26 @@ class DataPrepService:
             pass
         self.dask_client = None
         self.dask_cluster = None
-        DASK_CLIENT = None
-        DASK_CLUSTER = None
     
     def get_stable_files(self, run_dir: Path, pattern: str, min_age: int = 5) -> List[Path]:
-        """Get files that haven't been modified recently."""
         now = time.time()
-        stable_files = []
-        
-        for f in run_dir.glob(pattern):
-            try:
-                age = now - f.stat().st_mtime
-                if age >= min_age:
-                    stable_files.append(f)
-            except:
-                pass
-        
-        return sorted(stable_files)
+        return sorted([f for f in run_dir.glob(pattern) 
+                      if (now - f.stat().st_mtime) >= min_age])
     
     def read_run_data(self, run_dir: Path) -> Optional[cudf.DataFrame]:
-        """Read data from a run directory."""
         max_files = self.config.max_files_per_run
         
-        parquet_files = self.get_stable_files(run_dir, "worker_*.parquet")
-        if parquet_files:
-            return self._load_sampled_files(parquet_files, 'parquet', max_files)
-        
-        csv_files = self.get_stable_files(run_dir, "worker_*.csv")
-        if csv_files:
-            return self._load_sampled_files(csv_files, 'csv', max_files)
-        
-        bin_files = self.get_stable_files(run_dir, "worker_*.bin")
-        if bin_files:
-            return self._load_sampled_files(bin_files, 'binary', max_files)
+        for pattern, ftype in [("worker_*.parquet", 'parquet'), 
+                               ("worker_*.csv", 'csv'), 
+                               ("worker_*.bin", 'binary')]:
+            files = self.get_stable_files(run_dir, pattern)
+            if files:
+                return self._load_sampled_files(files, ftype, max_files)
         
         log(f"No stable data files found in {run_dir}")
         return None
     
     def _load_sampled_files(self, files: List[Path], file_type: str, max_files: int) -> cudf.DataFrame:
-        """Load files with sampling if too many."""
         total_files = len(files)
         
         if total_files > max_files:
@@ -336,26 +282,15 @@ class DataPrepService:
         
         if self.multi_gpu_enabled and file_type == 'parquet':
             return self._load_files_multi_gpu(files)
-        else:
-            return self._load_files_chunked(files, file_type)
+        return self._load_files_chunked(files, file_type)
     
     def _load_files_multi_gpu(self, files: List[Path]) -> Optional[cudf.DataFrame]:
-        """Load parquet files using Dask-cuDF across multiple GPUs."""
         start = time.time()
-        total_files = len(files)
-        
-        log(f"  Multi-GPU loading {total_files} files across {self.gpu_count} GPUs...")
+        log(f"  Multi-GPU loading {len(files)} files across {self.gpu_count} GPUs...")
         
         try:
-            file_paths = [str(f) for f in files]
-            
-            ddf = dask_cudf.read_parquet(
-                file_paths,
-                split_row_groups=True,
-            )
-            
-            num_partitions = ddf.npartitions
-            log(f"  Created {num_partitions} partitions across {self.gpu_count} GPUs")
+            ddf = dask_cudf.read_parquet([str(f) for f in files], split_row_groups=True)
+            log(f"  Created {ddf.npartitions} partitions across GPUs: {', '.join(self.gpu_names)}")
             
             ddf = ddf.persist()
             wait(ddf)
@@ -364,14 +299,12 @@ class DataPrepService:
             df = ddf.compute()
             
             elapsed = time.time() - start
-            throughput = len(df) / elapsed if elapsed > 0 else 0
-            log(f"  Complete: {len(df):,} records in {elapsed:.1f}s ({throughput/1e6:.1f}M rec/s) [multi-GPU]")
-            
+            log(f"  Complete: {len(df):,} records in {elapsed:.1f}s ({len(df)/elapsed/1e6:.1f}M rec/s) [multi-GPU]")
             return df
             
         except Exception as e:
             log(f"  WARNING: Multi-GPU load failed: {e}")
-            log(f"  Shutting down Dask cluster to free GPU memory...")
+            log(f"  Shutting down Dask cluster...")
             self._cleanup_dask()
             self.multi_gpu_enabled = False
             cp.get_default_memory_pool().free_all_blocks()
@@ -379,7 +312,6 @@ class DataPrepService:
             return self._load_files_chunked(files, 'parquet')
     
     def _load_files_chunked(self, files: List[Path], file_type: str) -> Optional[cudf.DataFrame]:
-        """Load and process files in chunks to avoid OOM."""
         start = time.time()
         batch_size = 5
         total_files = len(files)
@@ -387,13 +319,14 @@ class DataPrepService:
         running_records = 0
         output_parts = []
         
-        log(f"  Loading {total_files} files in {total_batches} batches...")
+        # Log which GPU we're using
+        current_gpu = cp.cuda.runtime.getDevice()
+        gpu_name = self.gpu_names[current_gpu] if current_gpu < len(self.gpu_names) else f"GPU{current_gpu}"
+        log(f"  Loading {total_files} files in {total_batches} batches on {gpu_name}...")
         
         for i in range(0, total_files, batch_size):
             batch_files = files[i:i + batch_size]
             batch_num = i // batch_size + 1
-            file_start = i + 1
-            file_end = min(i + batch_size, total_files)
             
             try:
                 if file_type == 'parquet':
@@ -404,30 +337,26 @@ class DataPrepService:
                 batch_df = cudf.concat(dfs, ignore_index=True)
                 batch_records = len(batch_df)
                 running_records += batch_records
-                
                 del dfs
                 output_parts.append(batch_df)
                 
-                log(f"  Batch {batch_num}/{total_batches}: files {file_start}-{file_end} -> {batch_records:,} records (total: {running_records:,})")
-                
+                log(f"  Batch {batch_num}/{total_batches}: files {i+1}-{min(i+batch_size, total_files)} -> {batch_records:,} records (total: {running_records:,})")
                 cp.get_default_memory_pool().free_all_blocks()
                 
             except Exception as e:
                 log(f"  WARNING: Batch {batch_num} failed: {e}")
                 cp.get_default_memory_pool().free_all_blocks()
-                continue
         
         if not output_parts:
             return None
         
         if len(output_parts) > 1:
-            log(f"  Merging {len(output_parts)} batches into single DataFrame...")
+            log(f"  Merging {len(output_parts)} batches...")
             while len(output_parts) > 1:
                 new_parts = []
                 for j in range(0, len(output_parts), 2):
                     if j + 1 < len(output_parts):
-                        merged = cudf.concat([output_parts[j], output_parts[j+1]], ignore_index=True)
-                        new_parts.append(merged)
+                        new_parts.append(cudf.concat([output_parts[j], output_parts[j+1]], ignore_index=True))
                     else:
                         new_parts.append(output_parts[j])
                 del output_parts
@@ -439,51 +368,43 @@ class DataPrepService:
         cp.get_default_memory_pool().free_all_blocks()
         
         elapsed = time.time() - start
-        throughput = len(df) / elapsed if elapsed > 0 else 0
-        log(f"  Complete: {len(df):,} records in {elapsed:.1f}s ({throughput/1e6:.1f}M rec/s)")
-        
+        log(f"  Complete: {len(df):,} records in {elapsed:.1f}s ({len(df)/elapsed/1e6:.1f}M rec/s)")
         return df
     
     def _load_binary_files(self, files: List[Path]) -> cudf.DataFrame:
-        """Load binary numpy files."""
         start = time.time()
         columns = ['Time'] + [f'V{i}' for i in range(1, 29)] + ['Amount', 'Class']
         
-        log(f"  Loading {len(files)} binary files...")
+        current_gpu = cp.cuda.runtime.getDevice()
+        gpu_name = self.gpu_names[current_gpu] if current_gpu < len(self.gpu_names) else f"GPU{current_gpu}"
+        log(f"  Loading {len(files)} binary files on {gpu_name}...")
+        
         arrays = []
-        running_records = 0
         for idx, f in enumerate(files, 1):
             try:
                 data = np.fromfile(str(f), dtype=np.float32).reshape(-1, 31)
-                running_records += len(data)
                 arrays.append(data)
                 if idx % 10 == 0 or idx == len(files):
-                    log(f"  File {idx}/{len(files)}: {running_records:,} records loaded")
+                    log(f"  File {idx}/{len(files)}: {sum(len(a) for a in arrays):,} records")
             except Exception as e:
                 log(f"  WARNING: Failed to load {f.name}: {e}")
         
         if not arrays:
             return None
         
-        combined = np.vstack(arrays)
-        df = cudf.DataFrame(combined, columns=columns)
-        
+        df = cudf.DataFrame(np.vstack(arrays), columns=columns)
         elapsed = time.time() - start
-        throughput = len(df) / elapsed if elapsed > 0 else 0
-        log(f"  Complete: {len(df):,} records in {elapsed:.1f}s ({throughput/1e6:.1f}M rec/s)")
+        log(f"  Complete: {len(df):,} records in {elapsed:.1f}s ({len(df)/elapsed/1e6:.1f}M rec/s)")
         return df
     
     def write_output(self, df: cudf.DataFrame, run_name: str):
-        """Write processed data to parquet via CPU."""
         output_file = self.output_path / f"features_{run_name}.parquet"
-        record_count = len(df)
-        log(f"Writing {record_count:,} records to {output_file.name}...")
+        log(f"Writing {len(df):,} records to {output_file.name}...")
         
         transfer_start = time.time()
         log(f"  GPU -> CPU transfer...")
         pdf = df.to_pandas()
-        transfer_time = time.time() - transfer_start
-        log(f"  Transfer complete: {transfer_time:.1f}s")
+        log(f"  Transfer complete: {time.time() - transfer_start:.1f}s")
         
         del df
         cp.get_default_memory_pool().free_all_blocks()
@@ -495,30 +416,23 @@ class DataPrepService:
         del pdf
         
         size_mb = output_file.stat().st_size / (1024*1024)
-        throughput = size_mb / write_time if write_time > 0 else 0
-        log(f"  Write complete: {size_mb:.1f} MB in {write_time:.1f}s ({throughput:.0f} MB/s)")
+        log(f"  Write complete: {size_mb:.1f} MB in {write_time:.1f}s ({size_mb/write_time:.0f} MB/s)")
         
+        # Metadata
         pf = pq.ParquetFile(output_file)
-        columns = pf.schema.names
-        
         exclude = ['transaction_id', 'prep_timestamp', 'Class']
-        feature_cols = [c for c in columns if c not in exclude]
-        
         metadata = {
             "run_name": run_name,
             "timestamp": datetime.now().isoformat(),
-            "columns": columns,
-            "feature_columns": feature_cols,
+            "columns": pf.schema.names,
+            "feature_columns": [c for c in pf.schema.names if c not in exclude],
             "target_column": "Class",
             "record_count": pf.metadata.num_rows
         }
-        
-        meta_file = self.output_path / f"metadata_{run_name}.json"
-        with open(meta_file, 'w') as f:
+        with open(self.output_path / f"metadata_{run_name}.json", 'w') as f:
             json.dump(metadata, f, indent=2)
     
     def process_run(self, run_dir: Path) -> bool:
-        """Process a single run directory."""
         run_name = run_dir.name
         run_start = time.time()
         log("=" * 60)
@@ -533,11 +447,9 @@ class DataPrepService:
             df = self.engineer.process(df, run_name)
             self.write_output(df, run_name)
             self.watcher.mark_processed(run_dir)
-            
             cp.get_default_memory_pool().free_all_blocks()
             
-            total_time = time.time() - run_start
-            log(f"SUCCESS: {run_name} (total: {total_time:.1f}s)")
+            log(f"SUCCESS: {run_name} (total: {time.time() - run_start:.1f}s)")
             log("=" * 60)
             return True
             
@@ -549,14 +461,10 @@ class DataPrepService:
             return False
     
     def run(self):
-        """Main run loop."""
         global STOP_FLAG
         
         if self.config.batch_mode:
-            runs = self.watcher.get_new_runs(
-                latest_only=self.config.latest_only,
-                min_age_seconds=self.config.file_stable_seconds
-            )
+            runs = self.watcher.get_new_runs(self.config.latest_only, self.config.file_stable_seconds)
             log(f"Batch mode: {len(runs)} run(s) to process")
             for run_dir in runs:
                 self.process_run(run_dir)
@@ -564,14 +472,10 @@ class DataPrepService:
         else:
             log("Watching for new runs...")
             last_status_time = time.time()
-            status_interval = 30
             runs_processed = 0
             
             while not STOP_FLAG:
-                runs = self.watcher.get_new_runs(
-                    latest_only=self.config.latest_only,
-                    min_age_seconds=self.config.file_stable_seconds
-                )
+                runs = self.watcher.get_new_runs(self.config.latest_only, self.config.file_stable_seconds)
                 
                 if runs:
                     for run_dir in runs:
@@ -580,11 +484,10 @@ class DataPrepService:
                         if self.process_run(run_dir):
                             runs_processed += 1
                     last_status_time = time.time()
-                else:
-                    if time.time() - last_status_time >= status_interval:
-                        processed_str = f" ({runs_processed} processed)" if runs_processed > 0 else ""
-                        log(f"Waiting for new data in {self.input_path.name}...{processed_str}")
-                        last_status_time = time.time()
+                elif time.time() - last_status_time >= 30:
+                    suffix = f" ({runs_processed} processed)" if runs_processed else ""
+                    log(f"Waiting for new data in {self.input_path.name}...{suffix}")
+                    last_status_time = time.time()
                 
                 if not STOP_FLAG:
                     time.sleep(self.config.poll_interval)
@@ -593,7 +496,7 @@ class DataPrepService:
 
 
 def main():
-    log(f"Starting (PID: {os.getpid()})")
+    log(f"Starting (PID: {MAIN_PID})")
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

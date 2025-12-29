@@ -3,19 +3,14 @@ FROM nvcr.io/nvidia/rapidsai/base:24.02-cuda12.0-py3.10
 
 LABEL description="Multi-GPU feature engineering using RAPIDS Dask-cuDF"
 
-# Suppress duplicate logging from RAPIDS/cuDF
+# Suppress library logging
 ENV RAPIDS_NO_INITIALIZE=1
-ENV CUDF_LOGGING_LEVEL=ERROR
+ENV CUDF_LOGGING_LEVEL=CRITICAL
 ENV PYTHONUNBUFFERED=1
-
-# Dask configuration
-ENV DASK_DISTRIBUTED__WORKER__MEMORY__TARGET=0.85
-ENV DASK_DISTRIBUTED__WORKER__MEMORY__SPILL=0.90
-ENV DASK_DISTRIBUTED__WORKER__MEMORY__PAUSE=0.95
+ENV DASK_DISTRIBUTED__LOGGING__DISTRIBUTED=critical
 
 WORKDIR /app
 
-# Application
 COPY prepare.py /app/
 
 ENV INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
@@ -27,5 +22,5 @@ ENV LATEST_ONLY=true
 ENV FILE_STABLE_SECONDS=10
 ENV USE_MULTI_GPU=true
 
-# Run directly without shell to avoid duplication
-CMD ["python", "-u", "/app/prepare.py"]
+# Use exec form without -u flag
+CMD ["python", "prepare.py"]

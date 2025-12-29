@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
-Pod 1: Data Gather Service
-==========================
-High-performance synthetic transaction data generator for the Financial Fraud
-Detection demo. Generates realistic credit card transaction data at scale
-using Pure Storage FlashBlade for high-throughput parallel writes.
+Pod 1: Data Gather Service - High-performance synthetic transaction data generator
 """
 
 import os
@@ -12,6 +8,7 @@ import sys
 import time
 import signal
 import subprocess
+import logging
 from pathlib import Path
 from datetime import datetime
 from typing import Dict
@@ -19,19 +16,23 @@ from typing import Dict
 import pandas as pd
 import numpy as np
 
-# Global stop flag for signal handling
+# Configure logging ONCE with explicit single handler
+logger = logging.getLogger('gather')
+logger.setLevel(logging.INFO)
+logger.handlers.clear()  # Remove any existing handlers
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+logger.addHandler(handler)
+logger.propagate = False  # Prevent propagation to root logger
+
 STOP_FLAG = False
 
 
 def log(msg: str):
-    """Simple timestamped logging to stdout only"""
-    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    sys.stdout.write(f"{ts} - {msg}\n")
-    sys.stdout.flush()
+    logger.info(msg)
 
 
 def load_schema(template_path: Path) -> Dict:
-    """Load schema from creditcard.csv template"""
     log(f"Loading schema template from: {template_path}")
     
     if not template_path.exists():
@@ -53,7 +54,6 @@ def load_schema(template_path: Path) -> Dict:
 
 
 def get_dir_stats(output_path: Path, file_pattern: str) -> tuple:
-    """Get total size and file count from directory"""
     files = list(output_path.glob(file_pattern))
     if not files:
         return 0, 0
@@ -62,7 +62,6 @@ def get_dir_stats(output_path: Path, file_pattern: str) -> tuple:
 
 
 def signal_handler(signum, frame):
-    """Handle SIGINT/SIGTERM"""
     global STOP_FLAG
     log(f"Received signal {signum}, stopping...")
     STOP_FLAG = True
@@ -76,10 +75,8 @@ def run_data_generation(
     chunk_size: int,
     output_format: str = 'parquet'
 ):
-    """Main data generation orchestrator"""
     global STOP_FLAG
     
-    # Create timestamped output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     output_path = output_base / f"run_{timestamp}"
     output_path.mkdir(parents=True, exist_ok=True)
@@ -89,7 +86,6 @@ def run_data_generation(
     log("=" * 70)
     log(f"Output directory: {output_path}")
     
-    # Load schema
     schema = load_schema(template_path)
     
     log(f"Workers:    {num_workers}")
@@ -98,7 +94,6 @@ def run_data_generation(
     log(f"Format:     {output_format}")
     log("=" * 70)
     
-    # Save schema for workers
     import json
     schema_file = output_path / "_schema.json"
     with open(schema_file, 'w') as f:
@@ -106,73 +101,46 @@ def run_data_generation(
     
     log(f"Starting {num_workers} worker processes...")
     
-    # Worker script - completely silent, no stdout/stderr
     worker_script = '''
-import sys
-import json
-import time
+import sys, json, time
 import numpy as np
 import pandas as pd
 from pathlib import Path
 
-def generate_data_fast(columns, stats, num_rows, rng):
+def gen(columns, stats, n, rng):
     data = {}
     for col in columns:
         if col in stats:
             if col == 'Class':
-                data[col] = rng.integers(0, 2, size=num_rows, dtype=np.int8)
+                data[col] = rng.integers(0, 2, size=n, dtype=np.int8)
             elif col == 'Time':
-                data[col] = rng.uniform(0, 172800, size=num_rows).astype(np.float32)
+                data[col] = rng.uniform(0, 172800, size=n).astype(np.float32)
             elif col == 'Amount':
-                data[col] = np.clip(np.abs(rng.lognormal(3.0, 2.0, num_rows)), 0, 25000).astype(np.float32)
+                data[col] = np.clip(np.abs(rng.lognormal(3.0, 2.0, n)), 0, 25000).astype(np.float32)
             else:
-                data[col] = rng.normal(stats[col]['mean'], max(stats[col]['std'], 0.01), num_rows).astype(np.float32)
+                data[col] = rng.normal(stats[col]['mean'], max(stats[col]['std'], 0.01), n).astype(np.float32)
     return pd.DataFrame(data)
 
-worker_id = int(sys.argv[1])
-output_dir = sys.argv[2]
-chunk_size = int(sys.argv[3])
-duration = int(sys.argv[4])
-schema_file = sys.argv[5]
-output_format = sys.argv[6]
+wid, odir, chunk, dur, sf, fmt = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], sys.argv[6]
+with open(sf) as f: schema = json.load(f)
+rng = np.random.default_rng(seed=wid * 12345 + int(time.time() * 1000) % 100000)
+cols, stats, t0, fc = schema['columns'], schema['stats'], time.time(), 0
 
-with open(schema_file) as f:
-    schema = json.load(f)
-
-rng = np.random.default_rng(seed=worker_id * 12345 + int(time.time() * 1000) % 100000)
-columns = schema['columns']
-stats = schema['stats']
-
-start_time = time.time()
-file_counter = 0
-
-if output_format == 'parquet':
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    
-    while (time.time() - start_time) < duration:
-        chunk = generate_data_fast(columns, stats, chunk_size, rng)
-        file_path = Path(output_dir) / f"worker_{worker_id:03d}_{file_counter:05d}.parquet"
-        table = pa.Table.from_pandas(chunk, preserve_index=False)
-        pq.write_table(table, file_path, compression=None)
-        file_counter += 1
-
-elif output_format == 'binary':
-    while (time.time() - start_time) < duration:
-        data = rng.standard_normal((chunk_size, 31)).astype(np.float32)
-        file_path = Path(output_dir) / f"worker_{worker_id:03d}_{file_counter:05d}.bin"
-        data.tofile(file_path)
-        file_counter += 1
-
+if fmt == 'parquet':
+    import pyarrow as pa, pyarrow.parquet as pq
+    while (time.time() - t0) < dur:
+        pq.write_table(pa.Table.from_pandas(gen(cols, stats, chunk, rng), preserve_index=False), Path(odir)/f"worker_{wid:03d}_{fc:05d}.parquet", compression=None)
+        fc += 1
+elif fmt == 'binary':
+    while (time.time() - t0) < dur:
+        rng.standard_normal((chunk, 31)).astype(np.float32).tofile(Path(odir)/f"worker_{wid:03d}_{fc:05d}.bin")
+        fc += 1
 else:
-    while (time.time() - start_time) < duration:
-        chunk = generate_data_fast(columns, stats, chunk_size, rng)
-        file_path = Path(output_dir) / f"worker_{worker_id:03d}_{file_counter:05d}.csv"
-        chunk.to_csv(file_path, index=False)
-        file_counter += 1
+    while (time.time() - t0) < dur:
+        gen(cols, stats, chunk, rng).to_csv(Path(odir)/f"worker_{wid:03d}_{fc:05d}.csv", index=False)
+        fc += 1
 '''
     
-    # Launch all workers with completely silenced output
     processes = []
     for worker_id in range(num_workers):
         p = subprocess.Popen(
@@ -180,7 +148,7 @@ else:
              str(worker_id), str(output_path), str(chunk_size), 
              str(duration_seconds), str(schema_file), output_format],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,  # Silence stderr to prevent output mixing
+            stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL
         )
         processes.append(p)
@@ -188,18 +156,9 @@ else:
     log(f"All {num_workers} workers launched. Monitoring for {duration_seconds}s...")
     log("-" * 70)
     
-    # Determine file pattern based on format
-    if output_format == 'parquet':
-        file_pattern = "worker_*.parquet"
-        bytes_per_row = 130
-    elif output_format == 'binary':
-        file_pattern = "worker_*.bin"
-        bytes_per_row = 31 * 4
-    else:
-        file_pattern = "worker_*.csv"
-        bytes_per_row = 200
+    file_pattern = {"parquet": "worker_*.parquet", "binary": "worker_*.bin"}.get(output_format, "worker_*.csv")
+    bytes_per_row = {"parquet": 130, "binary": 124}.get(output_format, 200)
     
-    # Monitor progress
     start_time = time.time()
     last_bytes = 0
     last_time = start_time
@@ -223,32 +182,22 @@ else:
             mbps = (interval_bytes / (1024 * 1024)) / interval_time if interval_time > 0 else 0
             gbps = mbps / 1024
             gb_total = current_bytes / (1024 * 1024 * 1024)
-            
-            est_records = current_bytes // bytes_per_row
             rps = (interval_bytes // bytes_per_row) / interval_time if interval_time > 0 else 0
             
-            speed_str = f"{mbps:6.1f} MB/s"
-            if mbps >= 1000:
-                speed_str = f"{gbps:5.2f} GB/s"
+            speed_str = f"{gbps:5.2f} GB/s" if mbps >= 1000 else f"{mbps:6.1f} MB/s"
             
-            log(f"[{elapsed:5.0f}s] Files: {file_count:5d} | "
-                f"Size: {gb_total:6.2f} GB | "
-                f"Speed: {speed_str} | "
-                f"~{rps/1e6:.2f}M rec/s | "
-                f"Workers: {running}")
+            log(f"[{elapsed:5.0f}s] Files: {file_count:5d} | Size: {gb_total:6.2f} GB | Speed: {speed_str} | ~{rps/1e6:.2f}M rec/s | Workers: {running}")
             
             last_bytes = current_bytes
             last_time = time.time()
         
         time.sleep(1)
     
-    # Terminate workers
     log("Stopping workers...")
     for p in processes:
         if p.poll() is None:
             p.terminate()
     
-    # Wait for workers to finish
     failed_workers = 0
     for p in processes:
         try:
@@ -262,7 +211,6 @@ else:
     if failed_workers > 0:
         log(f"WARNING: {failed_workers} workers exited with errors")
     
-    # Final report
     total_elapsed = time.time() - start_time
     final_bytes, final_files = get_dir_stats(output_path, file_pattern)
     final_gb = final_bytes / (1024 * 1024 * 1024)
@@ -277,10 +225,7 @@ else:
     log(f"Duration:    {total_elapsed:.1f} seconds")
     log(f"Files:       {final_files:,}")
     log(f"Total Size:  {final_gb:.2f} GB ({final_bytes:,} bytes)")
-    if avg_mbps >= 1000:
-        log(f"Throughput:  {avg_mbps/1024:.2f} GB/s average")
-    else:
-        log(f"Throughput:  {avg_mbps:.1f} MB/s average")
+    log(f"Throughput:  {avg_mbps/1024:.2f} GB/s average" if avg_mbps >= 1000 else f"Throughput:  {avg_mbps:.1f} MB/s average")
     log(f"Est Records: ~{est_records:,}")
     log("=" * 70)
     
@@ -289,7 +234,6 @@ else:
 
 
 def main():
-    """Main entry point"""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
