@@ -17,5 +17,5 @@ ENV LATEST_ONLY=true
 ENV FILE_STABLE_SECONDS=10
 ENV USE_MULTI_GPU=true
 
-# Redirect stderr to stdout to prevent duplicate lines
-CMD ["sh", "-c", "python prepare.py 2>&1"]
+# stderr handled in Python
+CMD ["python", "prepare.py"]

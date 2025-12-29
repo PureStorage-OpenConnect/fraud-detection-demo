@@ -3,6 +3,10 @@
 
 import os
 import sys
+
+# Redirect stderr to stdout at fd level to prevent Docker duplicate capture
+os.dup2(sys.stdout.fileno(), 2)
+
 import time
 import json
 import signal

@@ -17,5 +17,5 @@ ENV DURATION_SECONDS=300
 ENV CHUNK_SIZE=2000000
 ENV PYTHONUNBUFFERED=1
 
-# Redirect stderr to stdout to prevent duplicate lines from Docker
-CMD ["sh", "-c", "python gather.py 2>&1"]
+# stderr handled in Python
+CMD ["python", "gather.py"]
