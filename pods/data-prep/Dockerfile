@@ -1,16 +1,11 @@
-# Pod 2: Data Prep - Multi-GPU RAPIDS (Dask-cuDF)
 FROM nvcr.io/nvidia/rapidsai/base:24.02-cuda12.0-py3.10
 
-LABEL description="Multi-GPU feature engineering using RAPIDS Dask-cuDF"
-
-# Suppress library logging
 ENV RAPIDS_NO_INITIALIZE=1
 ENV CUDF_LOGGING_LEVEL=CRITICAL
 ENV PYTHONUNBUFFERED=1
 ENV DASK_DISTRIBUTED__LOGGING__DISTRIBUTED=critical
 
 WORKDIR /app
-
 COPY prepare.py /app/
 
 ENV INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
@@ -22,5 +17,5 @@ ENV LATEST_ONLY=true
 ENV FILE_STABLE_SECONDS=10
 ENV USE_MULTI_GPU=true
 
-# Use exec form without -u flag
-CMD ["python", "prepare.py"]
+# Redirect stderr to stdout to prevent duplicate lines
+CMD ["sh", "-c", "python prepare.py 2>&1"]
