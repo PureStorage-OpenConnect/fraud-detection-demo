@@ -159,8 +159,11 @@ def generate_chunk(n, pools, rng, categories, cat_weights, states, state_weights
     dob_timestamps = rng.integers(-946771200, 978307200, n)  # 1940-2000 as unix
     dob = pd.to_datetime(dob_timestamps, unit='s').strftime('%Y-%m-%d')
     
-    # Transaction IDs: hex strings (vectorized via format)
-    trans_num = np.array([f'{rng.integers(0, 2**64):016x}{rng.integers(0, 2**64):016x}' for _ in range(n)])
+    # Transaction IDs: hex strings (use 32-bit chunks to avoid int64 overflow)
+    trans_num = np.array([
+        f'{rng.integers(0, 2**32, dtype=np.uint32):08x}{rng.integers(0, 2**32, dtype=np.uint32):08x}{rng.integers(0, 2**32, dtype=np.uint32):08x}{rng.integers(0, 2**32, dtype=np.uint32):08x}'
+        for _ in range(n)
+    ])
     
     return {
         'trans_date_trans_time': trans_date_trans_time,
