@@ -84,7 +84,7 @@ def generate_pools(output_path: Path) -> Path:
         'city': [fake.city() for _ in range(POOL_SIZES['city'])],
         'merchant': [fake.company() for _ in range(POOL_SIZES['merchant'])],
         'job': [fake.job() for _ in range(POOL_SIZES['job'])],
-        'trans_num': [fake.uuid4().hex for _ in range(POOL_SIZES['trans_num'])],
+        'trans_num': [fake.uuid4().replace('-', '') for _ in range(POOL_SIZES['trans_num'])],
     }
     
     pools_file = output_path / "_pools.pkl"
