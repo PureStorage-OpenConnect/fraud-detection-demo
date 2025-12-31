@@ -60,12 +60,6 @@ def notify_fraud():
                       f"Score: {alert['fraud_score']:.4f} - "
                       f"Amount: ${alert['amount']:.2f}")
         
-        # In production, you would:
-        # 1. Send email/SMS notifications
-        # 2. Update fraud case management system
-        # 3. Trigger automated blocking if high confidence
-        # 4. Log to security information and event management (SIEM)
-        
         return jsonify({
             'status': 'success',
             'message': 'Alert received and processed',

@@ -9,10 +9,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY gather.py .
 
+# Default configuration
 ENV OUTPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
 ENV NUM_WORKERS=128
 ENV DURATION_SECONDS=300
-ENV CHUNK_SIZE=500000
+ENV CHUNK_SIZE=1000000
 ENV FRAUD_RATE=0.005
 ENV PYTHONUNBUFFERED=1
 

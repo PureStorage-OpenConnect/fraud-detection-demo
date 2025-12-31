@@ -1,21 +1,16 @@
 services:
-  # Pod 1: Data Gather - Financial Fraud Data Generator
+  # Pod 1: Data Gather - High-throughput transaction generator
   data-gather:
     build: ./pods/data-gather
     container_name: fraud-detection-gather
-    tty: false
-    stdin_open: false
     volumes:
-      - ${TEMPLATE_MOUNT:-/mnt/datasets/kaggle/creditcardfraud}:/mnt/datasets/kaggle/creditcardfraud:ro
-      - ${FB_OUTPUT_MOUNT:-/mnt/fsaai-shared/ebiser/fraud-data}:/mnt/fsaai-shared/ebiser/fraud-data
+      - /mnt/fsaai-shared/ebiser/fraud-data:/mnt/fsaai-shared/ebiser/fraud-data
     environment:
-      - TEMPLATE_DIR=/mnt/datasets/kaggle/creditcardfraud
-      - TEMPLATE_FILE=creditcard.csv
       - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
       - NUM_WORKERS=${NUM_WORKERS:-128}
       - DURATION_SECONDS=${DURATION_SECONDS:-300}
-      - CHUNK_SIZE=${CHUNK_SIZE:-2000000}
-      - OUTPUT_FORMAT=${OUTPUT_FORMAT:-parquet}
+      - CHUNK_SIZE=${CHUNK_SIZE:-1000000}
+      - FRAUD_RATE=${FRAUD_RATE:-0.005}
     deploy:
       resources:
         limits:
@@ -31,15 +26,12 @@ services:
     networks:
       - fraud-detection
 
-  # Pod 2: Data Prep (Multi-GPU) - RAPIDS Dask-cuDF
+  # Pod 2: Data Prep (Multi-GPU) - RAPIDS feature engineering
   data-prep:
     build: ./pods/data-prep
     container_name: fraud-detection-prep
-    tty: false
-    stdin_open: false
     volumes:
-      - ${FB_OUTPUT_MOUNT:-/mnt/fsaai-shared/ebiser/fraud-data}:/mnt/fsaai-shared/ebiser/fraud-data:ro
-      - ${FB_MOUNT:-/mnt/fsaai-shared/ebiser}:/mnt/fsaai-shared/ebiser
+      - /mnt/fsaai-shared/ebiser:/mnt/fsaai-shared/ebiser
     environment:
       - INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
       - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
@@ -60,61 +52,56 @@ services:
     networks:
       - fraud-detection
 
-  # Pod 3: Model Build (GPU Required)
+  # Pod 3: Model Build (GPU) - XGBoost training
   model-build:
     build: ./pods/model-build
     container_name: fraud-detection-build
-    tty: false
-    stdin_open: false
     volumes:
-      - ${FB_MOUNT:-/mnt/fsaai-shared/ebiser}:/mnt/fsaai-shared/ebiser
-      - fa-storage:/root/ebiser/nvidia.financial.fraud.detection
+      - /mnt/fsaai-shared/ebiser:/mnt/fsaai-shared/ebiser
+      - model-output:/workspace/model-output
     environment:
       - FB_MOUNT=/mnt/fsaai-shared/ebiser
-      - FA_MOUNT=/root/ebiser/nvidia.financial.fraud.detection
-      - S3_ENDPOINT=${S3_ENDPOINT}
-      - S3_ACCESS_KEY=${S3_ACCESS_KEY}
-      - S3_SECRET_KEY=${S3_SECRET_KEY}
-      - S3_BUCKET=${S3_BUCKET}
-      - FEATURES_FILE=${FEATURES_FILE}
+      - FA_MOUNT=/workspace/model-output
+      - PREP_OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
+      - S3_ENDPOINT=${S3_ENDPOINT:-}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
+      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
+      - S3_BUCKET=${S3_BUCKET:-}
+      - FEATURES_FILE=${FEATURES_FILE:-}
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 2
+              count: 1
               capabilities: [gpu]
     depends_on:
-      - data-prep
+      data-prep:
+        condition: service_completed_successfully
     networks:
       - fraud-detection
 
-  # Pod 4: Inference (GPU Required)
+  # Pod 4: Inference - Triton Server
   inference:
-    build: ./pods/inference
+    image: nvcr.io/nvidia/tritonserver:24.02-py3
     container_name: fraud-detection-inference
-    tty: false
-    stdin_open: false
     ports:
       - "8000:8000"
       - "8001:8001"
       - "8002:8002"
     volumes:
-      - fa-storage:/root/ebiser/nvidia.financial.fraud.detection
-    environment:
-      - FA_MOUNT=/root/ebiser/nvidia.financial.fraud.detection
-      - MODEL_REPOSITORY=/root/ebiser/nvidia.financial.fraud.detection/model_repository
-      - NOTIFICATION_ENDPOINT=http://notification:5000/notify/fraud
+      - model-output:/workspace/model-output:ro
+    command: ["tritonserver", "--model-repository=/workspace/model-output/model_repository", "--strict-model-config=false", "--log-verbose=1"]
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: 2
+              count: 1
               capabilities: [gpu]
     depends_on:
-      - model-build
-      - notification
+      model-build:
+        condition: service_completed_successfully
     networks:
       - fraud-detection
     healthcheck:
@@ -123,12 +110,10 @@ services:
       timeout: 10s
       retries: 3
 
-  # Pod 5: Notification
+  # Pod 5: Notification - Alert service
   notification:
     build: ./pods/notification
     container_name: fraud-detection-notification
-    tty: false
-    stdin_open: false
     ports:
       - "5000:5000"
     environment:
@@ -148,9 +133,5 @@ networks:
     driver: bridge
 
 volumes:
-  fa-storage:
+  model-output:
     driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${FA_MOUNT:-~/ebiser/nvidia.financial.fraud.detection}

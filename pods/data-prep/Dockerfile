@@ -8,6 +8,7 @@ ENV DASK_DISTRIBUTED__LOGGING__DISTRIBUTED=critical
 WORKDIR /app
 COPY prepare.py /app/
 
+# Default configuration
 ENV INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
 ENV OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
 ENV BATCH_MODE=false
@@ -17,5 +18,4 @@ ENV LATEST_ONLY=true
 ENV FILE_STABLE_SECONDS=10
 ENV USE_MULTI_GPU=true
 
-# stderr handled in Python
 CMD ["python", "prepare.py"]
