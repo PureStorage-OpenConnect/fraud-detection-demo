@@ -14,7 +14,6 @@ import json
 from pathlib import Path
 from datetime import datetime
 
-import pandas as pd
 import numpy as np
 
 STOP_FLAG = False
@@ -108,7 +107,6 @@ import pickle
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pandas as pd
 
 # Categories and states passed via pickle
 CATEGORIES = ['gas_transport', 'grocery_pos', 'misc_pos', 'misc_net', 'shopping_net',
@@ -158,8 +156,8 @@ def generate_chunk(n, pools, rng, categories, cat_weights, states, state_weights
     is_fraud = (rng.random(n) < fraud_rate).astype(np.int8)
     merch_zipcode = rng.integers(10000, 99999, n).astype(np.float32)
     
-    # Derived columns
-    trans_date_trans_time = pd.to_datetime(unix_time, unit='s')
+    # Derived columns - use numpy datetime64 directly (faster than pandas)
+    trans_date_trans_time = (unix_time.astype('datetime64[s]'))
     
     return {
         'trans_date_trans_time': trans_date_trans_time,
