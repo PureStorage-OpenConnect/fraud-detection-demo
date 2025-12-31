@@ -211,11 +211,13 @@ def worker_main():
     # Unique RNG per worker (seeded by worker_id + time for uniqueness)
     rng = np.random.default_rng(seed=worker_id * 54321 + int(time.time() * 1000) % 100000)
     
-    # Pre-convert to numpy arrays
+    # Pre-convert to numpy arrays and normalize weights
     categories = np.array(CATEGORIES)
     cat_weights = np.array(CATEGORY_WEIGHTS)
+    cat_weights = cat_weights / cat_weights.sum()  # Normalize to sum to 1.0
     states = np.array(US_STATES)
     state_weights = np.array(STATE_WEIGHTS)
+    state_weights = state_weights / state_weights.sum()  # Normalize to sum to 1.0
     
     file_count = 0
     start_time = time.time()
