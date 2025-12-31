@@ -53,6 +53,7 @@ POOL_SIZES = {
     'city': 10_000,
     'merchant': 20_000,
     'job': 5_000,
+    'trans_num': 100_000,  # UUIDs for transaction IDs
 }
 
 
@@ -83,6 +84,7 @@ def generate_pools(output_path: Path) -> Path:
         'city': [fake.city() for _ in range(POOL_SIZES['city'])],
         'merchant': [fake.company() for _ in range(POOL_SIZES['merchant'])],
         'job': [fake.job() for _ in range(POOL_SIZES['job'])],
+        'trans_num': [fake.uuid4().hex for _ in range(POOL_SIZES['trans_num'])],
     }
     
     pools_file = output_path / "_pools.pkl"
@@ -133,6 +135,7 @@ def generate_chunk(n, pools, rng, categories, cat_weights, states, state_weights
     street = pools['street'][rng.integers(0, len(pools['street']), n)]
     city = pools['city'][rng.integers(0, len(pools['city']), n)]
     job = pools['job'][rng.integers(0, len(pools['job']), n)]
+    trans_num = pools['trans_num'][rng.integers(0, len(pools['trans_num']), n)]
     
     # Categorical: weighted random choice (vectorized)
     category = categories[rng.choice(len(categories), n, p=cat_weights)]
@@ -158,12 +161,6 @@ def generate_chunk(n, pools, rng, categories, cat_weights, states, state_weights
     # DOB: random dates between 1940-2000
     dob_timestamps = rng.integers(-946771200, 978307200, n)  # 1940-2000 as unix
     dob = pd.to_datetime(dob_timestamps, unit='s').strftime('%Y-%m-%d')
-    
-    # Transaction IDs: hex strings (use 32-bit chunks to avoid int64 overflow)
-    trans_num = np.array([
-        f'{rng.integers(0, 2**32, dtype=np.uint32):08x}{rng.integers(0, 2**32, dtype=np.uint32):08x}{rng.integers(0, 2**32, dtype=np.uint32):08x}{rng.integers(0, 2**32, dtype=np.uint32):08x}'
-        for _ in range(n)
-    ])
     
     return {
         'trans_date_trans_time': trans_date_trans_time,
