@@ -1,14 +1,25 @@
+# Financial Fraud Detection Pipeline
+# Demonstrates Pure Storage FlashBlade/FlashArray with NVIDIA GPU acceleration
+#
+# Usage:
+#   make pipeline    # Run full pipeline (pods 1-4)
+#   make clean-data  # Remove generated data
+#   make clean-all   # Full cleanup
+
 services:
-  # Pod 1: Data Gather - High-throughput transaction generator
+  # ============================================================================
+  # Pod 1: Data Generator
+  # Generates synthetic credit card transactions at high throughput (2+ GB/s)
+  # ============================================================================
   data-gather:
     build: ./pods/data-gather
-    container_name: fraud-detection-gather
+    container_name: fraud-data-gather
     volumes:
-      - /mnt/fsaai-shared/ebiser/fraud-data:/mnt/fsaai-shared/ebiser/fraud-data
+      - ${FB_DATA:-/mnt/fsaai-shared/ebiser/fraud-data}:/data/output
     environment:
-      - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
+      - OUTPUT_DIR=/data/output
       - NUM_WORKERS=${NUM_WORKERS:-128}
-      - DURATION_SECONDS=${DURATION_SECONDS:-300}
+      - DURATION_SECONDS=${DURATION_SECONDS:-60}
       - CHUNK_SIZE=${CHUNK_SIZE:-1000000}
       - FRAUD_RATE=${FRAUD_RATE:-0.005}
     deploy:
@@ -16,31 +27,30 @@ services:
         limits:
           cpus: '32'
           memory: 64G
-        reservations:
-          cpus: '16'
-          memory: 32G
     ulimits:
       nofile:
         soft: 65536
         hard: 65536
     networks:
-      - fraud-detection
+      - fraud-net
 
-  # Pod 2: Data Prep (Multi-GPU) - RAPIDS feature engineering
+  # ============================================================================
+  # Pod 2: Feature Engineering (Multi-GPU)
+  # RAPIDS cuDF/Dask for GPU-accelerated data preparation
+  # ============================================================================
   data-prep:
     build: ./pods/data-prep
-    container_name: fraud-detection-prep
+    container_name: fraud-data-prep
     volumes:
-      - /mnt/fsaai-shared/ebiser:/mnt/fsaai-shared/ebiser
+      - ${FB_DATA:-/mnt/fsaai-shared/ebiser/fraud-data}:/data/input:ro
+      - ${FB_PREP:-/mnt/fsaai-shared/ebiser/prep-output}:/data/output
     environment:
-      - INPUT_DIR=/mnt/fsaai-shared/ebiser/fraud-data
-      - OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
-      - BATCH_MODE=${BATCH_MODE:-false}
-      - POLL_INTERVAL=${POLL_INTERVAL:-5}
-      - MAX_FILES_PER_RUN=${MAX_FILES_PER_RUN:-50}
-      - LATEST_ONLY=${LATEST_ONLY:-true}
-      - FILE_STABLE_SECONDS=${FILE_STABLE_SECONDS:-10}
-      - USE_MULTI_GPU=${USE_MULTI_GPU:-true}
+      - INPUT_DIR=/data/input
+      - OUTPUT_DIR=/data/output
+      - BATCH_MODE=true
+      - LATEST_ONLY=true
+      - MAX_FILES_PER_RUN=${MAX_FILES:-100}
+      - USE_MULTI_GPU=true
     shm_size: '16gb'
     deploy:
       resources:
@@ -50,23 +60,21 @@ services:
               count: all
               capabilities: [gpu]
     networks:
-      - fraud-detection
+      - fraud-net
 
-  # Pod 3: Model Build (GPU) - XGBoost training
+  # ============================================================================
+  # Pod 3: Model Training (GPU)
+  # XGBoost with GPU acceleration for fraud classification
+  # ============================================================================
   model-build:
     build: ./pods/model-build
-    container_name: fraud-detection-build
+    container_name: fraud-model-build
     volumes:
-      - /mnt/fsaai-shared/ebiser:/mnt/fsaai-shared/ebiser
-      - model-output:/workspace/model-output
+      - ${FB_PREP:-/mnt/fsaai-shared/ebiser/prep-output}:/data/input:ro
+      - ${MODEL_REPO:-./model_repository}:/data/models
     environment:
-      - FB_MOUNT=/mnt/fsaai-shared/ebiser
-      - FA_MOUNT=/workspace/model-output
-      - PREP_OUTPUT_DIR=/mnt/fsaai-shared/ebiser/prep-output
-      - S3_ENDPOINT=${S3_ENDPOINT:-}
-      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-}
-      - S3_SECRET_KEY=${S3_SECRET_KEY:-}
-      - S3_BUCKET=${S3_BUCKET:-}
+      - PREP_OUTPUT_DIR=/data/input
+      - FA_MOUNT=/data/models
       - FEATURES_FILE=${FEATURES_FILE:-}
     deploy:
       resources:
@@ -75,23 +83,23 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    depends_on:
-      data-prep:
-        condition: service_completed_successfully
     networks:
-      - fraud-detection
+      - fraud-net
 
-  # Pod 4: Inference - Triton Server
+  # ============================================================================
+  # Pod 4: Inference Server (GPU)
+  # NVIDIA Triton with FIL backend for real-time fraud detection
+  # ============================================================================
   inference:
     image: nvcr.io/nvidia/tritonserver:24.02-py3
-    container_name: fraud-detection-inference
+    container_name: fraud-inference
     ports:
-      - "8000:8000"
-      - "8001:8001"
-      - "8002:8002"
+      - "8000:8000"   # HTTP
+      - "8001:8001"   # gRPC
+      - "8002:8002"   # Metrics
     volumes:
-      - model-output:/workspace/model-output:ro
-    command: ["tritonserver", "--model-repository=/workspace/model-output/model_repository", "--strict-model-config=false", "--log-verbose=1"]
+      - ${MODEL_REPO:-./model_repository}:/models:ro
+    command: ["tritonserver", "--model-repository=/models"]
     deploy:
       resources:
         reservations:
@@ -99,39 +107,34 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    depends_on:
-      model-build:
-        condition: service_completed_successfully
     networks:
-      - fraud-detection
+      - fraud-net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # Pod 5: Notification - Alert service
+  # ============================================================================
+  # Pod 5: Notification Service
+  # REST API for fraud alerts
+  # ============================================================================
   notification:
     build: ./pods/notification
-    container_name: fraud-detection-notification
+    container_name: fraud-notification
     ports:
       - "5000:5000"
     environment:
       - HOST=0.0.0.0
       - PORT=5000
-      - DEBUG=False
     networks:
-      - fraud-detection
+      - fraud-net
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 30s
-      timeout: 10s
+      interval: 10s
+      timeout: 5s
       retries: 3
 
 networks:
-  fraud-detection:
+  fraud-net:
     driver: bridge
-
-volumes:
-  model-output:
-    driver: local

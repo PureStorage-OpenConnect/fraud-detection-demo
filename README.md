@@ -2,7 +2,7 @@
 
 [![NVIDIA](https://img.shields.io/badge/NVIDIA-L40S-76B900?logo=nvidia)](https://www.nvidia.com/)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
-[![RAPIDS](https://img.shields.io/badge/RAPIDS-Dask--cuDF-blueviolet)](https://rapids.ai/)
+[![RAPIDS](https://img.shields.io/badge/RAPIDS-cuDF-blueviolet)](https://rapids.ai/)
 [![FlashBlade](https://img.shields.io/badge/Pure_Storage-FlashBlade-FF6600)](https://www.purestorage.com/products/unstructured-data-storage/flashblade-s.html)
 [![FlashArray](https://img.shields.io/badge/Pure_Storage-FlashArray-FF6600)](https://www.purestorage.com/products/unified-block-file-storage.html)
 
@@ -10,11 +10,11 @@ A containerized fraud detection pipeline demonstrating high-performance AI/ML wo
 
 ## Overview
 
-This project implements the [NVIDIA Financial Fraud Detection AI Blueprint](https://github.com/NVIDIA-AI-Blueprints/Financial-Fraud-Detection) as a 5-pod containerized architecture, optimized for Pure Storage FlashBlade (high-throughput) and FlashArray (low-latency) storage tiers.
+This project implements a financial fraud detection pipeline as a 5-pod containerized architecture, optimized for Pure Storage FlashBlade (high-throughput) and FlashArray (low-latency) storage tiers.
 
 **Key Demonstrations:**
-- Pure Storage FlashBlade parallel I/O for data generation and feature engineering
-- Multi-GPU processing with RAPIDS Dask-cuDF
+- Pure Storage FlashBlade parallel I/O at 2+ GB/s for data generation
+- Multi-GPU processing with RAPIDS cuDF and Dask
 - End-to-end ML pipeline from data generation to real-time inference
 
 ## Architecture
@@ -50,9 +50,9 @@ graph LR
 
 | Pod | Container | GPU | Description |
 |-----|-----------|-----|-------------|
-| 1 | `data-gather` | - | Generates synthetic transaction data at scale |
-| 2 | `data-prep` | Multi-GPU | RAPIDS Dask-cuDF feature engineering |
-| 3 | `model-build` | GPU | Trains XGBoost and GNN fraud detection models |
+| 1 | `data-gather` | - | Generates synthetic transaction data at 2+ GB/s |
+| 2 | `data-prep` | Multi-GPU | RAPIDS cuDF/Dask feature engineering |
+| 3 | `model-build` | GPU | Trains XGBoost fraud detection model |
 | 4 | `inference` | GPU | NVIDIA Triton Inference Server |
 | 5 | `notification` | - | Fraud alert webhook service |
 
@@ -77,11 +77,10 @@ FlashBlade: /mnt/fsaai-shared/ebiser/
     ├── features_run_*.parquet    # Engineered features
     └── metadata_run_*.json       # Feature metadata
 
-FlashArray: ~/ebiser/nvidia.financial.fraud.detection/
-└── model_repository/             # Pod 3 output, Pod 4 input
-    └── fraud_xgboost/
-        ├── config.pbtxt
-        └── 1/model.json
+Model Repository: ./model_repository/
+└── fraud_xgboost/                # Pod 3 output, Pod 4 input
+    ├── config.pbtxt
+    └── 1/xgboost.json
 ```
 
 ## Quick Start
@@ -90,8 +89,7 @@ FlashArray: ~/ebiser/nvidia.financial.fraud.detection/
 
 - Docker with NVIDIA Container Toolkit
 - NVIDIA GPU(s) - tested with 2x L40S
-- Pure Storage mounts configured
-- [Kaggle Credit Card Fraud Dataset](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) (template)
+- Pure Storage FlashBlade mount configured
 
 ### Build and Run
 
@@ -100,99 +98,82 @@ FlashArray: ~/ebiser/nvidia.financial.fraud.detection/
 git clone <repository-url>
 cd financial-fraud-demo
 
+# Create data directories
+sudo mkdir -p /mnt/fsaai-shared/ebiser/fraud-data
+sudo mkdir -p /mnt/fsaai-shared/ebiser/prep-output
+sudo chmod -R 777 /mnt/fsaai-shared/ebiser/
+
 # Build all containers
-docker-compose build
+make build
 
-# Run data generation (5 minutes default)
-docker-compose up data-gather
+# Run full pipeline (data → features → model)
+make pipeline
 
-# Run feature engineering (watches for new data)
-docker-compose up data-prep
+# Start inference server
+make inference
 
-# Run model training
-docker-compose up model-build
-
-# Start inference service
-docker-compose up inference notification
+# Test inference
+make test
 ```
 
 ## Pod Details
 
 ### Pod 1: Data Gather
 
-Generates synthetic credit card transaction data matching the Kaggle schema using parallel workers.
+Generates synthetic credit card transactions using pool-based generation for maximum FlashBlade throughput.
 
 **Configuration:**
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NUM_WORKERS` | 128 | Parallel worker processes |
-| `DURATION_SECONDS` | 300 | Generation duration |
-| `CHUNK_SIZE` | 2000000 | Rows per output file |
-| `OUTPUT_FORMAT` | parquet | Output format (parquet/csv/binary) |
+| `DURATION_SECONDS` | 60 | Generation duration |
+| `CHUNK_SIZE` | 1,000,000 | Rows per output file |
+| `FRAUD_RATE` | 0.005 | Fraud label rate (0.5%) |
 
 **Example Output:**
 ```
 ======================================================================
 Pod 1: Financial Fraud Data Generator
 ======================================================================
-Output directory: /mnt/fsaai-shared/ebiser/fraud-data/run_20251226_193027
-Workers:    128
-Duration:   300 seconds
-Format:     parquet
+Output:   /data/output/run_20251231_183733
+Workers:  128
+Duration: 60s
+Chunk:    1,000,000 rows
+Fraud:    0.5%
 ----------------------------------------------------------------------
-[  30s] Files:  128 | Size:  45.00 GB | Speed: 1.01 GB/s | Workers: 128
+[  30s] Files:   384 | Size:  50.00 GB | Speed: 2.01 GB/s | Workers: 128
+[  60s] Files:   768 | Size: 100.45 GB | Speed: 1.98 GB/s | Workers: 128
+======================================================================
+COMPLETE: 768 files | 100.45 GB | 1.67 GB/s avg
+======================================================================
 ```
 
 ### Pod 2: Data Prep (Multi-GPU)
 
-GPU-accelerated feature engineering using RAPIDS Dask-cuDF for multi-GPU parallelism.
+GPU-accelerated feature engineering using RAPIDS cuDF with Dask for multi-GPU parallelism.
 
-**Features:**
-- Automatic multi-GPU distribution via Dask LocalCUDACluster
-- Standard scaling for PCA columns (V1-V28)
-- Time-based features (hour_of_day, is_night)
-- Interaction features (V1*V2, amount*V1)
-- Graceful fallback to single-GPU if Dask fails
+**Features Added:**
+- Amount: `amt_log`, `amt_scaled`
+- Time: `hour_of_day`, `day_of_week`, `is_weekend`, `is_night`
+- Geography: `distance_km` (customer-merchant Haversine)
+- Categorical: `category_encoded`, `state_encoded`, `gender_encoded`
+- Other: `city_pop_log`, `zip_region`
 
 **Configuration:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MAX_FILES_PER_RUN` | 50 | Files to process per run |
+| `MAX_FILES_PER_RUN` | 100 | Files to process per run |
 | `USE_MULTI_GPU` | true | Enable Dask multi-GPU |
 | `LATEST_ONLY` | true | Process only newest run |
-
-**Example Output:**
-```
-============================================================
-Pod 2: Data Prep Service (RAPIDS cuDF)
-============================================================
-GPU: 2x NVIDIA L40S (44GB each)
-Multi-GPU: ENABLED (2 GPUs via Dask)
-  Dask cluster ready: http://127.0.0.1:8787/status
-------------------------------------------------------------
-Processing: run_20251226_193027
-  Multi-GPU loading 100 files across 2 GPUs...
-  Created 200 partitions across 2 GPUs
-  Complete: 200,000,000 records in 45.2s (4.4M rec/s) [multi-GPU]
-Feature engineering on 200,000,000 records (31 columns)...
-  Added 11 features in 1.8s (111.1M rec/s)
-Writing 200,000,000 records to features_run_20251226_193027.parquet...
-SUCCESS: run_20251226_193027 (total: 185.3s)
-============================================================
-Waiting for new data in fraud-data... (1 processed)
-```
 
 ### Pod 3: Model Build
 
 Trains XGBoost classifier with GPU acceleration.
 
-**Models:**
-- XGBoost binary classifier (GPU-accelerated)
-- GNN embeddings (placeholder for PyTorch Geometric)
-
 **Output:**
 - Triton-compatible model repository
-- Optional S3 versioning for model archives
+- FIL backend configuration
+- Feature name mapping
 
 ### Pod 4: Inference
 
@@ -213,16 +194,18 @@ Flask webhook service for fraud alerts.
 - `POST /notify/fraud` - Receive fraud alerts
 - `GET /alerts` - List recent alerts
 - `GET /alerts/stats` - Alert statistics
+- `GET /health` - Health check
 
 ## Performance Benchmarks
 
-Tested on: 2x NVIDIA L40S (44GB each), Pure Storage FlashBlade
+Tested on: 2x NVIDIA L40S, Pure Storage FlashBlade
 
-| Metric | Single GPU | Multi-GPU (2x) |
-|--------|------------|----------------|
-| Data Loading | 2.4M rec/s | 4.4M rec/s |
-| Feature Engineering | 116M rec/s | 111M rec/s |
-| Total Pipeline (100M records) | ~180s | ~95s |
+| Stage | Performance |
+|-------|-------------|
+| Data Generation | 2.0-2.5 GB/s sustained |
+| Feature Engineering (50M rows) | ~140 seconds |
+| Model Training (40M rows) | ~17 seconds |
+| Inference Latency | <1ms per transaction |
 
 ## Configuration
 
@@ -231,60 +214,110 @@ Tested on: 2x NVIDIA L40S (44GB each), Pure Storage FlashBlade
 Create a `.env` file or export these variables:
 
 ```bash
-# Storage mounts
-FB_MOUNT=/mnt/fsaai-shared/ebiser
-FB_OUTPUT_MOUNT=/mnt/fsaai-shared/ebiser/fraud-data
-FA_MOUNT=~/ebiser/nvidia.financial.fraud.detection
-TEMPLATE_MOUNT=/mnt/datasets/kaggle/creditcardfraud
+# Storage paths (FlashBlade)
+FB_DATA=/mnt/fsaai-shared/ebiser/fraud-data
+FB_PREP=/mnt/fsaai-shared/ebiser/prep-output
+
+# Model output
+MODEL_REPO=./model_repository
 
 # Pod 1: Data generation
 NUM_WORKERS=128
-DURATION_SECONDS=300
-CHUNK_SIZE=2000000
-OUTPUT_FORMAT=parquet
+DURATION_SECONDS=60
+CHUNK_SIZE=1000000
+FRAUD_RATE=0.005
 
 # Pod 2: Feature engineering
-MAX_FILES_PER_RUN=50
+MAX_FILES=100
 USE_MULTI_GPU=true
 LATEST_ONLY=true
-
-# Pod 3: Model versioning (optional)
-S3_ENDPOINT=https://flashblade.example.com
-S3_ACCESS_KEY=your-key
-S3_SECRET_KEY=your-secret
-S3_BUCKET=fraud-models
 ```
+
+### Make Commands
+
+| Command | Description |
+|---------|-------------|
+| `make build` | Build all containers |
+| `make pipeline` | Run full pipeline (pods 1-3) |
+| `make inference` | Start Triton server |
+| `make test` | Test inference endpoint |
+| `make stop` | Stop all containers |
+| `make clean-data` | Remove generated data |
+| `make clean-all` | Full cleanup |
+| `make demo` | Quick 1-minute demo |
+
+### Running Individual Pods
+
+```bash
+# Run data generation only
+make pod1
+
+# Custom duration
+DURATION=300 NUM_WORKERS=256 make pod1
+
+# Run feature engineering
+make pod2
+
+# Run model training
+make pod3
+```
+
+## Transaction Schema
+
+The pipeline generates realistic credit card transactions with 23 columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| trans_date_trans_time | datetime | Transaction timestamp |
+| cc_num | int64 | Credit card number |
+| merchant | string | Merchant name |
+| category | string | Transaction category |
+| amt | float | Transaction amount |
+| first, last | string | Customer name |
+| gender | string | M/F |
+| street, city, state, zip | string/int | Customer address |
+| lat, long | float | Customer coordinates |
+| city_pop | int | City population |
+| job | string | Customer occupation |
+| dob | string | Date of birth |
+| trans_num | string | Transaction ID |
+| unix_time | int64 | Unix timestamp |
+| merch_lat, merch_long | float | Merchant coordinates |
+| is_fraud | int8 | Fraud label (0/1) |
+| merch_zipcode | int | Merchant zip code |
 
 ## Troubleshooting
 
-### Multi-GPU not detected
+### GPU not detected
 
 ```bash
 # Verify NVIDIA runtime
-docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi
+```
 
-# Check Dask dashboard (during data-prep run)
-# URL shown in logs: http://127.0.0.1:8787/status
+### Permission errors on FlashBlade
+
+```bash
+# Fix mount permissions
+sudo chmod -R 777 /mnt/fsaai-shared/ebiser/
 ```
 
 ### Out of memory errors
 
 ```bash
 # Reduce files per run
-MAX_FILES_PER_RUN=50 docker-compose up data-prep
-
-# Or disable multi-GPU (uses chunked loading)
-USE_MULTI_GPU=false docker-compose up data-prep
+MAX_FILES=25 make pod2
 ```
 
-### FlashBlade connectivity
+### Model not loading in Triton
 
 ```bash
-# Verify mount
-ls -la /mnt/fsaai-shared/ebiser/
+# Verify model structure
+ls -la ./model_repository/fraud_xgboost/
+ls -la ./model_repository/fraud_xgboost/1/
 
-# Check permissions
-touch /mnt/fsaai-shared/ebiser/fraud-data/test && rm /mnt/fsaai-shared/ebiser/fraud-data/test
+# Check config format
+cat ./model_repository/fraud_xgboost/config.pbtxt
 ```
 
 ## License
@@ -295,4 +328,5 @@ Apache License 2.0
 
 - [NVIDIA Financial Fraud Detection Blueprint](https://github.com/NVIDIA-AI-Blueprints/Financial-Fraud-Detection)
 - [RAPIDS AI](https://rapids.ai/)
-- [Kaggle Credit Card Fraud Dataset](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud)
+- [Pure Storage](https://www.purestorage.com/)
+- [Kaggle Credit Card Dataset](https://www.kaggle.com/datasets/priyamchoksi/credit-card-transactions-dataset?resource=download)

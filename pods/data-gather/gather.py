@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Pod 1: Data Gather Service - High-throughput credit card transaction generator
-Uses pool-based generation for maximum FlashBlade write performance (target: 2-3 GB/s)
+Pod 1: Data Generator
+Generates synthetic credit card transactions for fraud detection demo.
+Target: 2+ GB/s write throughput to Pure Storage FlashBlade.
+
+Uses pool-based generation with NumPy for maximum performance.
 """
 
 import os
@@ -10,7 +13,6 @@ import time
 import signal
 import subprocess
 import pickle
-import json
 from pathlib import Path
 from datetime import datetime
 
@@ -18,16 +20,16 @@ import numpy as np
 
 STOP_FLAG = False
 
-# Category distribution from actual fraud dataset
+# Transaction categories with realistic distribution
 CATEGORIES = [
     'gas_transport', 'grocery_pos', 'misc_pos', 'misc_net', 'shopping_net',
     'shopping_pos', 'grocery_net', 'entertainment', 'food_dining', 'home',
     'kids_pets', 'travel', 'health_fitness', 'personal_care'
 ]
-CATEGORY_WEIGHTS = [
+CATEGORY_WEIGHTS = np.array([
     0.243, 0.226, 0.106, 0.092, 0.083, 0.080, 0.079, 0.037,
     0.019, 0.012, 0.008, 0.005, 0.005, 0.004
-]
+])
 
 # US states weighted by population
 US_STATES = [
@@ -37,14 +39,15 @@ US_STATES = [
     'IA', 'NV', 'AR', 'MS', 'KS', 'NM', 'NE', 'ID', 'WV', 'HI',
     'NH', 'ME', 'MT', 'RI', 'DE', 'SD', 'ND', 'AK', 'VT', 'WY'
 ]
-STATE_WEIGHTS = [
+STATE_WEIGHTS = np.array([
     0.118, 0.087, 0.065, 0.059, 0.039, 0.038, 0.035, 0.032, 0.031, 0.030,
     0.027, 0.026, 0.023, 0.022, 0.021, 0.021, 0.020, 0.018, 0.018, 0.018,
     0.017, 0.017, 0.015, 0.015, 0.014, 0.013, 0.013, 0.012, 0.011, 0.010,
     0.010, 0.009, 0.009, 0.009, 0.009, 0.006, 0.006, 0.006, 0.005, 0.004,
     0.004, 0.004, 0.003, 0.003, 0.003, 0.003, 0.002, 0.002, 0.002, 0.002
-]
+])
 
+# String pool sizes for Faker-generated data
 POOL_SIZES = {
     'first': 10_000,
     'last': 15_000,
@@ -52,297 +55,218 @@ POOL_SIZES = {
     'city': 10_000,
     'merchant': 20_000,
     'job': 5_000,
-    'trans_num': 100_000,  # UUIDs for transaction IDs
-    'dob': 25_000,  # Date of birth strings (1940-2000)
+    'trans_num': 100_000,
+    'dob': 25_000,
 }
 
 
 def log(msg):
-    print(f"{datetime.now():%Y-%m-%d %H:%M:%S} - {msg}", flush=True)
+    print(f"{datetime.now():%Y-%m-%d %H:%M:%S} | {msg}", flush=True)
 
 
 def signal_handler(signum, frame):
     global STOP_FLAG
-    log(f"Received signal {signum}, stopping...")
+    log("Shutdown signal received")
     STOP_FLAG = True
 
 
 def generate_pools(output_path: Path) -> Path:
-    """Generate string pools using Faker - runs ONCE at startup."""
+    """Generate string pools using Faker (one-time startup cost)."""
     from faker import Faker
     
-    fake = Faker('en_US')
-    Faker.seed(42)  # Reproducible pools
-    
-    log("Generating string pools (one-time startup cost)...")
-    start = time.time()
+    log("Generating string pools...")
+    fake = Faker()
+    Faker.seed(42)
     
     pools = {
-        'first': [fake.first_name() for _ in range(POOL_SIZES['first'])],
-        'last': [fake.last_name() for _ in range(POOL_SIZES['last'])],
-        'street': [fake.street_address() for _ in range(POOL_SIZES['street'])],
-        'city': [fake.city() for _ in range(POOL_SIZES['city'])],
-        'merchant': [fake.company() for _ in range(POOL_SIZES['merchant'])],
-        'job': [fake.job() for _ in range(POOL_SIZES['job'])],
-        'trans_num': [fake.uuid4().replace('-', '') for _ in range(POOL_SIZES['trans_num'])],
-        'dob': [fake.date_of_birth(minimum_age=25, maximum_age=85).strftime('%Y-%m-%d') for _ in range(POOL_SIZES['dob'])],
+        'first': np.array([fake.first_name() for _ in range(POOL_SIZES['first'])]),
+        'last': np.array([fake.last_name() for _ in range(POOL_SIZES['last'])]),
+        'street': np.array([fake.street_address() for _ in range(POOL_SIZES['street'])]),
+        'city': np.array([fake.city() for _ in range(POOL_SIZES['city'])]),
+        'merchant': np.array([f"{fake.company().replace(',', '')} {fake.company_suffix()}" 
+                             for _ in range(POOL_SIZES['merchant'])]),
+        'job': np.array([fake.job().replace(',', ' ') for _ in range(POOL_SIZES['job'])]),
+        'trans_num': np.array([fake.uuid4().replace('-', '') for _ in range(POOL_SIZES['trans_num'])]),
+        'dob': np.array([fake.date_of_birth(minimum_age=18, maximum_age=85).strftime('%Y-%m-%d') 
+                        for _ in range(POOL_SIZES['dob'])]),
+        'categories': np.array(CATEGORIES),
+        'category_weights': CATEGORY_WEIGHTS / CATEGORY_WEIGHTS.sum(),
+        'states': np.array(US_STATES),
+        'state_weights': STATE_WEIGHTS / STATE_WEIGHTS.sum(),
     }
     
     pools_file = output_path / "_pools.pkl"
     with open(pools_file, 'wb') as f:
         pickle.dump(pools, f)
     
-    elapsed = time.time() - start
-    total = sum(len(v) for v in pools.values())
-    log(f"Pools ready: {total:,} values in {elapsed:.1f}s")
-    
+    total = sum(POOL_SIZES.values())
+    log(f"  Created {total:,} pooled values")
     return pools_file
 
 
-# Worker script - runs as subprocess for true parallelism (no GIL)
+# Worker script (runs in subprocess for true parallelism)
 WORKER_SCRIPT = '''
-import sys
-import time
-import pickle
+import sys, pickle, time
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from pathlib import Path
 
-# Categories and states passed via pickle
-CATEGORIES = ['gas_transport', 'grocery_pos', 'misc_pos', 'misc_net', 'shopping_net',
-              'shopping_pos', 'grocery_net', 'entertainment', 'food_dining', 'home',
-              'kids_pets', 'travel', 'health_fitness', 'personal_care']
-CATEGORY_WEIGHTS = [0.243, 0.226, 0.106, 0.092, 0.083, 0.080, 0.079, 0.037,
-                    0.019, 0.012, 0.008, 0.005, 0.005, 0.004]
-US_STATES = ['CA', 'TX', 'FL', 'NY', 'PA', 'IL', 'OH', 'GA', 'NC', 'MI',
-             'NJ', 'VA', 'WA', 'AZ', 'MA', 'TN', 'IN', 'MO', 'MD', 'WI',
-             'CO', 'MN', 'SC', 'AL', 'LA', 'KY', 'OR', 'OK', 'CT', 'UT',
-             'IA', 'NV', 'AR', 'MS', 'KS', 'NM', 'NE', 'ID', 'WV', 'HI',
-             'NH', 'ME', 'MT', 'RI', 'DE', 'SD', 'ND', 'AK', 'VT', 'WY']
-STATE_WEIGHTS = [0.118, 0.087, 0.065, 0.059, 0.039, 0.038, 0.035, 0.032, 0.031, 0.030,
-                 0.027, 0.026, 0.023, 0.022, 0.021, 0.021, 0.020, 0.018, 0.018, 0.018,
-                 0.017, 0.017, 0.015, 0.015, 0.014, 0.013, 0.013, 0.012, 0.011, 0.010,
-                 0.010, 0.009, 0.009, 0.009, 0.009, 0.006, 0.006, 0.006, 0.005, 0.004,
-                 0.004, 0.004, 0.003, 0.003, 0.003, 0.003, 0.002, 0.002, 0.002, 0.002]
-
-def generate_chunk(n, pools, rng, categories, cat_weights, states, state_weights, fraud_rate):
-    """Generate n rows using vectorized NumPy operations."""
+def generate_chunk(pools, n, rng, fraud_rate, base_time):
+    """Generate n transactions using vectorized operations."""
+    # Timestamps throughout 2024
+    unix_times = rng.integers(base_time, base_time + 31536000, size=n, dtype=np.int64)
     
-    # String columns: index into pools (vectorized O(n))
-    first = pools['first'][rng.integers(0, len(pools['first']), n)]
-    last = pools['last'][rng.integers(0, len(pools['last']), n)]
-    merchant = pools['merchant'][rng.integers(0, len(pools['merchant']), n)]
-    street = pools['street'][rng.integers(0, len(pools['street']), n)]
-    city = pools['city'][rng.integers(0, len(pools['city']), n)]
-    job = pools['job'][rng.integers(0, len(pools['job']), n)]
-    trans_num = pools['trans_num'][rng.integers(0, len(pools['trans_num']), n)]
-    dob = pools['dob'][rng.integers(0, len(pools['dob']), n)]
+    # Geographic data (US bounds)
+    lats = rng.uniform(25.0, 48.0, n).astype(np.float32)
+    longs = rng.uniform(-125.0, -70.0, n).astype(np.float32)
+    merch_lats = lats + rng.normal(0, 0.5, n).astype(np.float32)
+    merch_longs = longs + rng.normal(0, 0.5, n).astype(np.float32)
     
-    # Categorical: weighted random choice (vectorized)
-    category = categories[rng.choice(len(categories), n, p=cat_weights)]
-    state = states[rng.choice(len(states), n, p=state_weights)]
-    gender = np.where(rng.random(n) < 0.55, 'F', 'M')
+    # Transaction amounts (lognormal distribution)
+    amts = np.clip(np.abs(rng.lognormal(3.5, 1.5, n)), 1.0, 25000.0).astype(np.float32)
     
-    # Numeric columns: direct vectorized generation
-    cc_num = rng.integers(4_000_000_000_000_000, 6_999_999_999_999_999, n, dtype=np.int64)
-    amt = np.clip(np.abs(rng.lognormal(4.0, 1.5, n)), 1.0, 2000.0).astype(np.float32)
-    zip_code = rng.integers(10000, 99999, n, dtype=np.int32)
-    lat = rng.uniform(24.5, 49.0, n).astype(np.float32)
-    long = rng.uniform(-124.5, -66.5, n).astype(np.float32)
-    city_pop = rng.integers(100, 500000, n, dtype=np.int32)
-    unix_time = rng.integers(1704067200, 1735689600, n, dtype=np.int64)  # 2024
-    merch_lat = (lat + rng.uniform(-0.5, 0.5, n)).astype(np.float32)
-    merch_long = (long + rng.uniform(-0.5, 0.5, n)).astype(np.float32)
-    is_fraud = (rng.random(n) < fraud_rate).astype(np.int8)
-    merch_zipcode = rng.integers(10000, 99999, n).astype(np.float32)
-    
-    # Derived columns - use numpy datetime64 directly (faster than pandas)
-    trans_date_trans_time = (unix_time.astype('datetime64[s]'))
+    # Pool sampling
+    idx = lambda pool: rng.integers(0, len(pools[pool]), n)
     
     return {
-        'trans_date_trans_time': trans_date_trans_time,
-        'cc_num': cc_num,
-        'merchant': merchant,
-        'category': category,
-        'amt': amt,
-        'first': first,
-        'last': last,
-        'gender': gender,
-        'street': street,
-        'city': city,
-        'state': state,
-        'zip': zip_code,
-        'lat': lat,
-        'long': long,
-        'city_pop': city_pop,
-        'job': job,
-        'dob': dob,
-        'trans_num': trans_num,
-        'unix_time': unix_time,
-        'merch_lat': merch_lat,
-        'merch_long': merch_long,
-        'is_fraud': is_fraud,
-        'merch_zipcode': merch_zipcode,
+        'trans_date_trans_time': (np.datetime64('1970-01-01') + unix_times.astype('timedelta64[s]')).astype(str),
+        'cc_num': rng.integers(4000000000000000, 5000000000000000, size=n, dtype=np.int64),
+        'merchant': pools['merchant'][idx('merchant')],
+        'category': pools['categories'][rng.choice(len(pools['categories']), size=n, p=pools['category_weights'])],
+        'amt': amts,
+        'first': pools['first'][idx('first')],
+        'last': pools['last'][idx('last')],
+        'gender': np.where(rng.random(n) < 0.5, 'M', 'F'),
+        'street': pools['street'][idx('street')],
+        'city': pools['city'][idx('city')],
+        'state': pools['states'][rng.choice(len(pools['states']), size=n, p=pools['state_weights'])],
+        'zip': rng.integers(10000, 99999, size=n, dtype=np.int32),
+        'lat': lats,
+        'long': longs,
+        'city_pop': rng.integers(1000, 2000000, size=n, dtype=np.int32),
+        'job': pools['job'][idx('job')],
+        'dob': pools['dob'][idx('dob')],
+        'trans_num': pools['trans_num'][idx('trans_num')],
+        'unix_time': unix_times,
+        'merch_lat': merch_lats,
+        'merch_long': merch_longs,
+        'is_fraud': (rng.random(n) < fraud_rate).astype(np.int8),
+        'merch_zipcode': rng.integers(10000, 99999, size=n, dtype=np.int32),
     }
 
+# Parse args
+worker_id = int(sys.argv[1])
+output_dir = Path(sys.argv[2])
+chunk_size = int(sys.argv[3])
+duration = int(sys.argv[4])
+pools_file = sys.argv[5]
+fraud_rate = float(sys.argv[6])
 
-def worker_main():
-    worker_id = int(sys.argv[1])
-    output_dir = sys.argv[2]
-    pools_file = sys.argv[3]
-    chunk_size = int(sys.argv[4])
-    duration = int(sys.argv[5])
-    fraud_rate = float(sys.argv[6])
-    
-    # Load pre-generated pools
-    with open(pools_file, 'rb') as f:
-        pools = pickle.load(f)
-    
-    # Convert to numpy arrays for O(1) indexing
-    for key in pools:
-        pools[key] = np.array(pools[key], dtype=object)
-    
-    # Unique RNG per worker (seeded by worker_id + time for uniqueness)
-    rng = np.random.default_rng(seed=worker_id * 54321 + int(time.time() * 1000) % 100000)
-    
-    # Pre-convert to numpy arrays and normalize weights
-    categories = np.array(CATEGORIES)
-    cat_weights = np.array(CATEGORY_WEIGHTS)
-    cat_weights = cat_weights / cat_weights.sum()  # Normalize to sum to 1.0
-    states = np.array(US_STATES)
-    state_weights = np.array(STATE_WEIGHTS)
-    state_weights = state_weights / state_weights.sum()  # Normalize to sum to 1.0
-    
-    file_count = 0
-    start_time = time.time()
-    
-    # Main generation loop
-    while (duration == 0) or (time.time() - start_time) < duration:
-        data = generate_chunk(chunk_size, pools, rng, categories, cat_weights, 
-                             states, state_weights, fraud_rate)
-        
-        # Write using PyArrow directly (faster than pandas)
-        table = pa.Table.from_pydict(data)
-        filepath = f"{output_dir}/worker_{worker_id:03d}_{file_count:05d}.parquet"
-        pq.write_table(table, filepath, compression=None)  # None = max speed
-        
-        file_count += 1
+# Load pools and init RNG
+with open(pools_file, 'rb') as f:
+    pools = pickle.load(f)
+rng = np.random.default_rng(seed=worker_id * 54321 + int(time.time() * 1000) % 100000)
+base_time = 1704067200  # 2024-01-01
 
-
-if __name__ == "__main__":
-    worker_main()
+# Generate until duration expires
+start = time.time()
+file_count = 0
+while (time.time() - start) < duration:
+    data = generate_chunk(pools, chunk_size, rng, fraud_rate, base_time)
+    table = pa.Table.from_pydict(data)
+    pq.write_table(table, output_dir / f"worker_{worker_id:03d}_{file_count:05d}.parquet", compression=None)
+    file_count += 1
 '''
 
 
 def main():
-    global STOP_FLAG
-    
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Configuration from environment
-    output_base = Path(os.getenv('OUTPUT_DIR', '/mnt/fsaai-shared/ebiser/fraud-data'))
+    # Configuration
+    output_dir = Path(os.getenv('OUTPUT_DIR', '/data/output'))
     num_workers = int(os.getenv('NUM_WORKERS', '128'))
-    duration = int(os.getenv('DURATION_SECONDS', '300'))
-    chunk_size = int(os.getenv('CHUNK_SIZE', '500000'))
+    duration = int(os.getenv('DURATION_SECONDS', '60'))
+    chunk_size = int(os.getenv('CHUNK_SIZE', '1000000'))
     fraud_rate = float(os.getenv('FRAUD_RATE', '0.005'))
     
     # Create timestamped output directory
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_path = output_base / f"run_{timestamp}"
-    output_path.mkdir(parents=True, exist_ok=True)
+    run_path = output_dir / f"run_{timestamp}"
+    run_path.mkdir(parents=True, exist_ok=True)
     
     log("=" * 70)
-    log("Pod 1: Credit Card Transaction Generator")
+    log("Pod 1: Financial Fraud Data Generator")
     log("=" * 70)
-    log(f"Output: {output_path}")
-    log(f"Workers: {num_workers} | Duration: {duration}s | Chunk: {chunk_size:,} rows")
-    log(f"Schema: 23 columns | Fraud rate: {fraud_rate*100:.1f}%")
-    log("=" * 70)
+    log(f"Output:   {run_path}")
+    log(f"Workers:  {num_workers}")
+    log(f"Duration: {duration}s")
+    log(f"Chunk:    {chunk_size:,} rows")
+    log(f"Fraud:    {fraud_rate*100:.1f}%")
+    log("-" * 70)
     
-    # Generate pools (one-time startup cost)
-    pools_file = generate_pools(output_path)
+    # Generate string pools
+    pools_file = generate_pools(run_path)
     
-    # Save schema metadata
-    schema = {
-        'columns': [
-            'trans_date_trans_time', 'cc_num', 'merchant', 'category', 'amt',
-            'first', 'last', 'gender', 'street', 'city', 'state', 'zip',
-            'lat', 'long', 'city_pop', 'job', 'dob', 'trans_num', 'unix_time',
-            'merch_lat', 'merch_long', 'is_fraud', 'merch_zipcode'
-        ],
-        'fraud_rate': fraud_rate,
-        'chunk_size': chunk_size,
-        'num_workers': num_workers,
-        'timestamp': timestamp
-    }
-    with open(output_path / "_schema.json", 'w') as f:
-        json.dump(schema, f, indent=2)
-    
-    # Launch worker subprocesses
+    # Launch worker processes
     log(f"Launching {num_workers} workers...")
     processes = []
     for i in range(num_workers):
         p = subprocess.Popen(
             [sys.executable, '-c', WORKER_SCRIPT, 
-             str(i), str(output_path), str(pools_file), 
-             str(chunk_size), str(duration), str(fraud_rate)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL
+             str(i), str(run_path), str(chunk_size), str(duration), 
+             str(pools_file), str(fraud_rate)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         processes.append(p)
     
-    # Monitor throughput
+    # Monitor progress
     start_time = time.time()
-    last_bytes, last_time = 0, start_time
+    last_bytes = 0
+    last_time = start_time
     
     while not STOP_FLAG:
         elapsed = time.time() - start_time
         running = sum(1 for p in processes if p.poll() is None)
         
-        if elapsed >= duration + 30 or running == 0:
+        if elapsed >= duration + 10 or running == 0:
             break
         
         if time.time() - last_time >= 5.0:
-            files = list(output_path.glob("worker_*.parquet"))
+            files = list(run_path.glob("worker_*.parquet"))
             current_bytes = sum(f.stat().st_size for f in files) if files else 0
             interval = time.time() - last_time
+            speed = ((current_bytes - last_bytes) / (1024**3)) / interval
+            total_gb = current_bytes / (1024**3)
             
-            bytes_per_sec = (current_bytes - last_bytes) / interval if interval > 0 else 0
-            gb = current_bytes / (1024**3)
+            log(f"[{elapsed:5.0f}s] Files: {len(files):5d} | "
+                f"Size: {total_gb:6.2f} GB | Speed: {speed:5.2f} GB/s | Workers: {running}")
             
-            if bytes_per_sec >= 1024**3:
-                speed = f"{bytes_per_sec / (1024**3):5.2f} GB/s"
-            else:
-                speed = f"{bytes_per_sec / (1024**2):6.1f} MB/s"
-            
-            log(f"[{elapsed:5.0f}s] Files: {len(files):5d} | Size: {gb:6.2f} GB | Speed: {speed} | Workers: {running}")
-            
-            last_bytes, last_time = current_bytes, time.time()
+            last_bytes = current_bytes
+            last_time = time.time()
         
         time.sleep(1)
     
-    # Graceful shutdown
-    log("Stopping workers...")
+    # Cleanup
     for p in processes:
         if p.poll() is None:
             p.terminate()
-    
     for p in processes:
         try:
             p.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        except:
             p.kill()
     
-    # Final statistics
-    files = list(output_path.glob("worker_*.parquet"))
-    final_bytes = sum(f.stat().st_size for f in files) if files else 0
+    # Final stats
+    pools_file.unlink(missing_ok=True)
+    files = list(run_path.glob("worker_*.parquet"))
+    total_bytes = sum(f.stat().st_size for f in files) if files else 0
     total_time = time.time() - start_time
     
     log("=" * 70)
-    log(f"COMPLETE: {len(files):,} files | {final_bytes/(1024**3):.2f} GB | {(final_bytes/(1024**2))/total_time:.0f} MB/s avg")
-    log(f"Output: {output_path}")
+    log(f"COMPLETE: {len(files):,} files | {total_bytes/(1024**3):.2f} GB | "
+        f"{(total_bytes/(1024**3))/total_time:.2f} GB/s avg")
     log("=" * 70)
 
 

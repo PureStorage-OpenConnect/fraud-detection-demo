@@ -1,21 +1,18 @@
-FROM python:3.10-slim
+# Pod 5: Notification Service
+# REST API for fraud alerts
 
-LABEL description="Pod 5: Notification Service for Fraud Detection Pipeline"
+FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
-    flask==3.0.0 \
-    gunicorn==21.2.0 \
-    requests==2.31.0
+RUN pip install --no-cache-dir flask gunicorn
 
-COPY app.py /app/
+COPY app.py .
 
 ENV HOST=0.0.0.0
 ENV PORT=5000
-ENV DEBUG=False
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "4", "--timeout", "120", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "app:app"]
