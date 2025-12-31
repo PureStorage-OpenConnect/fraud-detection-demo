@@ -54,6 +54,7 @@ POOL_SIZES = {
     'merchant': 20_000,
     'job': 5_000,
     'trans_num': 100_000,  # UUIDs for transaction IDs
+    'dob': 25_000,  # Date of birth strings (1940-2000)
 }
 
 
@@ -85,6 +86,7 @@ def generate_pools(output_path: Path) -> Path:
         'merchant': [fake.company() for _ in range(POOL_SIZES['merchant'])],
         'job': [fake.job() for _ in range(POOL_SIZES['job'])],
         'trans_num': [fake.uuid4().replace('-', '') for _ in range(POOL_SIZES['trans_num'])],
+        'dob': [fake.date_of_birth(minimum_age=25, maximum_age=85).strftime('%Y-%m-%d') for _ in range(POOL_SIZES['dob'])],
     }
     
     pools_file = output_path / "_pools.pkl"
@@ -136,6 +138,7 @@ def generate_chunk(n, pools, rng, categories, cat_weights, states, state_weights
     city = pools['city'][rng.integers(0, len(pools['city']), n)]
     job = pools['job'][rng.integers(0, len(pools['job']), n)]
     trans_num = pools['trans_num'][rng.integers(0, len(pools['trans_num']), n)]
+    dob = pools['dob'][rng.integers(0, len(pools['dob']), n)]
     
     # Categorical: weighted random choice (vectorized)
     category = categories[rng.choice(len(categories), n, p=cat_weights)]
@@ -157,10 +160,6 @@ def generate_chunk(n, pools, rng, categories, cat_weights, states, state_weights
     
     # Derived columns
     trans_date_trans_time = pd.to_datetime(unix_time, unit='s')
-    
-    # DOB: random dates between 1940-2000
-    dob_timestamps = rng.integers(-946771200, 978307200, n)  # 1940-2000 as unix
-    dob = pd.to_datetime(dob_timestamps, unit='s').strftime('%Y-%m-%d')
     
     return {
         'trans_date_trans_time': trans_date_trans_time,
