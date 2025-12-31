@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Pod 3: Model Build Service
-Train GNN and XGBoost models for fraud detection
-Based on NVIDIA Financial Fraud Detection Blueprint
+Train XGBoost model for credit card fraud detection
 """
 
 import os
@@ -14,11 +13,8 @@ from datetime import datetime
 
 import cudf
 import cupy as cp
+import numpy as np
 import xgboost as xgb
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, SAGEConv
 import boto3
 
 # Configure logging
@@ -28,35 +24,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class GNNModel(nn.Module):
-    """Graph Neural Network for fraud detection embeddings"""
-    
-    def __init__(self, in_channels, hidden_channels=64, out_channels=32):
-        super(GNNModel, self).__init__()
-        self.conv1 = SAGEConv(in_channels, hidden_channels)
-        self.conv2 = SAGEConv(hidden_channels, hidden_channels)
-        self.conv3 = SAGEConv(hidden_channels, out_channels)
-        self.dropout = nn.Dropout(0.3)
-    
-    def forward(self, x, edge_index):
-        x = F.relu(self.conv1(x, edge_index))
-        x = self.dropout(x)
-        x = F.relu(self.conv2(x, edge_index))
-        x = self.dropout(x)
-        x = self.conv3(x, edge_index)
-        return x
 
 class ModelBuildService:
-    """Train GNN and XGBoost models"""
+    """Train XGBoost fraud detection model"""
+    
+    # Feature columns for the new schema
+    FEATURE_COLUMNS = [
+        # Original numeric
+        'amt', 'lat', 'long', 'city_pop', 'unix_time', 
+        'merch_lat', 'merch_long', 'merch_zipcode', 'zip',
+        # Engineered features
+        'amt_log', 'amt_scaled', 'hour_of_day', 'day_of_week',
+        'is_weekend', 'is_night', 'distance_km', 
+        'category_encoded', 'state_encoded', 'gender_encoded',
+        'city_pop_log', 'zip_region'
+    ]
     
     def __init__(self, fb_mount: str, fa_mount: str, s3_bucket: str = None, prep_output_dir: str = None):
         self.fb_mount = Path(fb_mount)
         self.fa_mount = Path(fa_mount)
-        # Allow override via parameter or use default
+        
         if prep_output_dir:
             self.prep_output_path = Path(prep_output_dir)
         else:
             self.prep_output_path = self.fb_mount / "prep-output"
+        
         self.model_repo_path = self.fa_mount / "model_repository"
         self.s3_bucket = s3_bucket
         self.s3_client = None
@@ -101,7 +93,7 @@ class ModelBuildService:
         logger.info(f"Loading features from: {filepath}")
         
         df = cudf.read_parquet(filepath)
-        logger.info(f"Loaded {len(df)} records with {len(df.columns)} features")
+        logger.info(f"Loaded {len(df)} records with {len(df.columns)} columns")
         
         return df
     
@@ -109,48 +101,43 @@ class ModelBuildService:
         """Prepare data for training"""
         logger.info("Preparing training data...")
         
-        # Feature columns (exclude IDs and target)
-        exclude_cols = ['transaction_id', 'timestamp', 'user_id', 'merchant_id', 
-                       'currency', 'transaction_type', 'channel', 'is_fraud']
-        feature_cols = [col for col in df.columns if col not in exclude_cols]
+        # Get available feature columns
+        available_features = [col for col in self.FEATURE_COLUMNS if col in df.columns]
+        missing_features = [col for col in self.FEATURE_COLUMNS if col not in df.columns]
+        
+        if missing_features:
+            logger.warning(f"Missing features (will skip): {missing_features}")
+        
+        logger.info(f"Using {len(available_features)} features: {available_features}")
         
         # Handle missing values
         df = df.fillna(0)
         
-        # Split train/test (80/20)
-        split_idx = int(len(df) * 0.8)
-        train_df = df.iloc[:split_idx]
-        test_df = df.iloc[split_idx:]
+        # Verify target column exists
+        if 'is_fraud' not in df.columns:
+            raise ValueError("Target column 'is_fraud' not found in data")
         
-        # Convert to numpy/cupy
-        X_train = train_df[feature_cols].to_cupy()
-        y_train = train_df['is_fraud'].to_cupy()
-        X_test = test_df[feature_cols].to_cupy()
-        y_test = test_df['is_fraud'].to_cupy()
+        # Split train/test (80/20) with shuffle
+        n = len(df)
+        indices = cp.arange(n)
+        cp.random.shuffle(indices)
         
-        logger.info(f"Train set: {len(X_train)} samples")
-        logger.info(f"Test set: {len(X_test)} samples")
+        split_idx = int(n * 0.8)
+        train_idx = indices[:split_idx]
+        test_idx = indices[split_idx:]
+        
+        # Extract features and target
+        X_train = df.iloc[train_idx.get()][available_features].to_cupy()
+        y_train = df.iloc[train_idx.get()]['is_fraud'].to_cupy()
+        X_test = df.iloc[test_idx.get()][available_features].to_cupy()
+        y_test = df.iloc[test_idx.get()]['is_fraud'].to_cupy()
+        
+        logger.info(f"Train set: {len(X_train):,} samples")
+        logger.info(f"Test set: {len(X_test):,} samples")
         logger.info(f"Fraud rate (train): {float(y_train.mean()):.4f}")
         logger.info(f"Fraud rate (test): {float(y_test.mean()):.4f}")
         
-        return X_train, y_train, X_test, y_test, feature_cols
-    
-    def train_gnn_embeddings(self, df: cudf.DataFrame):
-        """Train GNN to generate embeddings (placeholder)"""
-        logger.info("Training GNN model...")
-        
-        # Note: Full GNN training requires PyTorch Geometric setup
-        # This is a simplified placeholder
-        
-        num_users = df['user_id'].max() + 1
-        embedding_dim = 32
-        
-        # Create random embeddings as placeholder
-        embeddings = cp.random.randn(num_users, embedding_dim).astype(cp.float32)
-        
-        logger.info(f"Generated GNN embeddings: {embeddings.shape}")
-        
-        return embeddings
+        return X_train, y_train, X_test, y_test, available_features
     
     def train_xgboost(self, X_train, y_train, X_test, y_test):
         """Train XGBoost classifier"""
@@ -160,17 +147,24 @@ class ModelBuildService:
         dtrain = xgb.DMatrix(X_train, label=y_train)
         dtest = xgb.DMatrix(X_test, label=y_test)
         
+        # Calculate scale_pos_weight for imbalanced data
+        fraud_count = float(y_train.sum())
+        non_fraud_count = len(y_train) - fraud_count
+        scale_pos_weight = non_fraud_count / fraud_count if fraud_count > 0 else 1.0
+        
+        logger.info(f"Scale pos weight: {scale_pos_weight:.2f}")
+        
         # XGBoost parameters
         params = {
             'objective': 'binary:logistic',
-            'eval_metric': 'auc',
+            'eval_metric': ['auc', 'logloss'],
             'max_depth': 8,
             'learning_rate': 0.1,
             'subsample': 0.8,
             'colsample_bytree': 0.8,
-            'tree_method': 'gpu_hist',
-            'gpu_id': 0,
-            'predictor': 'gpu_predictor'
+            'scale_pos_weight': scale_pos_weight,
+            'tree_method': 'hist',
+            'device': 'cuda:0',
         }
         
         # Train model
@@ -187,13 +181,26 @@ class ModelBuildService:
         )
         
         # Evaluate
-        y_pred = model.predict(dtest)
-        y_pred_binary = (y_pred > 0.5).astype(int)
+        y_pred_proba = model.predict(dtest)
+        y_pred_binary = (y_pred_proba > 0.5).astype(int)
         
         # Calculate metrics
-        accuracy = float((y_pred_binary == y_test).sum() / len(y_test))
+        y_test_np = cp.asnumpy(y_test)
+        accuracy = float((y_pred_binary == y_test_np).sum() / len(y_test_np))
+        
+        # Precision, Recall, F1 for fraud class
+        tp = float(((y_pred_binary == 1) & (y_test_np == 1)).sum())
+        fp = float(((y_pred_binary == 1) & (y_test_np == 0)).sum())
+        fn = float(((y_pred_binary == 0) & (y_test_np == 1)).sum())
+        
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
         
         logger.info(f"Model accuracy: {accuracy:.4f}")
+        logger.info(f"Fraud precision: {precision:.4f}")
+        logger.info(f"Fraud recall: {recall:.4f}")
+        logger.info(f"Fraud F1: {f1:.4f}")
         
         return model
     
@@ -210,6 +217,12 @@ class ModelBuildService:
         model_file = model_path / "model.json"
         model.save_model(str(model_file))
         logger.info(f"Saved XGBoost model to: {model_file}")
+        
+        # Save feature names
+        feature_file = config_path / "feature_names.json"
+        with open(feature_file, 'w') as f:
+            json.dump({"features": feature_names}, f, indent=2)
+        logger.info(f"Saved feature names to: {feature_file}")
         
         # Create Triton config
         config = {
@@ -312,11 +325,14 @@ class ModelBuildService:
         # Prepare training data
         X_train, y_train, X_test, y_test, feature_names = self.prepare_training_data(df)
         
-        # Train models
-        gnn_embeddings = self.train_gnn_embeddings(df)
+        # Free memory
+        del df
+        cp.get_default_memory_pool().free_all_blocks()
+        
+        # Train model
         xgb_model = self.train_xgboost(X_train, y_train, X_test, y_test)
         
-        # Save models
+        # Save model
         self.save_xgboost_model(xgb_model, feature_names)
         
         # Version to S3
@@ -327,16 +343,20 @@ class ModelBuildService:
         logger.info(f"Model repository: {self.model_repo_path}")
         logger.info("=" * 60)
 
+
 def main():
     """Main entry point"""
     fb_mount = os.getenv('FB_MOUNT', '/mnt/fsaai-shared/ebiser')
     fa_mount = os.getenv('FA_MOUNT', '~/ebiser/nvidia.financial.fraud.detection')
+    # Expand ~ in path
+    fa_mount = os.path.expanduser(fa_mount)
     s3_bucket = os.getenv('S3_BUCKET')
     features_file = os.getenv('FEATURES_FILE', None)
-    prep_output_dir = os.getenv('PREP_OUTPUT_DIR', None)  # Optional override
+    prep_output_dir = os.getenv('PREP_OUTPUT_DIR', None)
     
     service = ModelBuildService(fb_mount, fa_mount, s3_bucket, prep_output_dir)
     service.run(features_file)
+
 
 if __name__ == "__main__":
     main()

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Pod 2: Data Prepare Service (Multi-GPU RAPIDS)"""
+"""
+Pod 2: Data Prepare Service (Multi-GPU RAPIDS)
+Feature engineering for credit card transaction fraud detection
+"""
 
 import os
 import sys
@@ -27,7 +30,7 @@ import pyarrow.parquet as pq
 import dask
 dask.config.set({
     'distributed.logging.distributed': 'critical',
-    'distributed.scheduler.work-stealing': False,  # Reduce CPU polling
+    'distributed.scheduler.work-stealing': False,
     'distributed.scheduler.bandwidth': 100000000,
 })
 import dask_cudf
@@ -36,6 +39,25 @@ from dask_cuda import LocalCUDACluster
 
 STOP_FLAG = False
 MAIN_PID = os.getpid()
+
+# Category encoding map
+CATEGORY_MAP = {
+    'gas_transport': 0, 'grocery_pos': 1, 'misc_pos': 2, 'misc_net': 3,
+    'shopping_net': 4, 'shopping_pos': 5, 'grocery_net': 6, 'entertainment': 7,
+    'food_dining': 8, 'home': 9, 'kids_pets': 10, 'travel': 11,
+    'health_fitness': 12, 'personal_care': 13
+}
+
+# State encoding (top states by population)
+STATE_MAP = {
+    'CA': 0, 'TX': 1, 'FL': 2, 'NY': 3, 'PA': 4, 'IL': 5, 'OH': 6, 'GA': 7,
+    'NC': 8, 'MI': 9, 'NJ': 10, 'VA': 11, 'WA': 12, 'AZ': 13, 'MA': 14,
+    'TN': 15, 'IN': 16, 'MO': 17, 'MD': 18, 'WI': 19, 'CO': 20, 'MN': 21,
+    'SC': 22, 'AL': 23, 'LA': 24, 'KY': 25, 'OR': 26, 'OK': 27, 'CT': 28,
+    'UT': 29, 'IA': 30, 'NV': 31, 'AR': 32, 'MS': 33, 'KS': 34, 'NM': 35,
+    'NE': 36, 'ID': 37, 'WV': 38, 'HI': 39, 'NH': 40, 'ME': 41, 'MT': 42,
+    'RI': 43, 'DE': 44, 'SD': 45, 'ND': 46, 'AK': 47, 'VT': 48, 'WY': 49
+}
 
 
 def log(msg):
@@ -62,33 +84,61 @@ class Config:
 
 
 def engineer_features_partition(df):
-    """Feature engineering function to run on each GPU partition."""
+    """Feature engineering on each GPU partition."""
     import cupy as cp
     
-    # Scale PCA columns
-    for i in range(1, 29):
-        col = f'V{i}'
-        if col in df.columns:
-            mean, std = float(df[col].mean()), float(df[col].std())
-            if std > 0.001:
-                df[col] = (df[col] - mean) / std
+    # === Amount features ===
+    if 'amt' in df.columns:
+        df['amt_log'] = cp.log1p(df['amt'].values)
+        amt_mean = float(df['amt'].mean())
+        amt_std = float(df['amt'].std())
+        if amt_std > 0.001:
+            df['amt_scaled'] = (df['amt'] - amt_mean) / amt_std
+        else:
+            df['amt_scaled'] = 0.0
     
-    if 'Amount' in df.columns:
-        df['amount_log'] = cp.log1p(df['Amount'].values)
-        mean, std = float(df['Amount'].mean()), float(df['Amount'].std())
-        if std > 0.001:
-            df['amount_scaled'] = (df['Amount'] - mean) / std
-    
-    if 'Time' in df.columns:
-        df['hour_of_day'] = (df['Time'] / 3600) % 24
+    # === Time features (from unix_time) ===
+    if 'unix_time' in df.columns:
+        # Hour of day (0-23)
+        df['hour_of_day'] = ((df['unix_time'] % 86400) // 3600).astype('int8')
+        # Day of week (0=Monday, 6=Sunday) - approximate
+        df['day_of_week'] = ((df['unix_time'] // 86400) % 7).astype('int8')
+        # Is weekend (Saturday=5, Sunday=6)
+        df['is_weekend'] = ((df['day_of_week'] >= 5)).astype('int8')
+        # Is night (10pm - 6am)
         df['is_night'] = ((df['hour_of_day'] >= 22) | (df['hour_of_day'] <= 6)).astype('int8')
     
-    if 'V1' in df.columns and 'V2' in df.columns:
-        df['V1_V2_interaction'] = df['V1'] * df['V2']
+    # === Geographic features ===
+    if all(col in df.columns for col in ['lat', 'long', 'merch_lat', 'merch_long']):
+        # Distance between customer and merchant (Haversine approximation in km)
+        lat1 = cp.radians(df['lat'].values)
+        lat2 = cp.radians(df['merch_lat'].values)
+        dlat = lat2 - lat1
+        dlon = cp.radians(df['merch_long'].values - df['long'].values)
+        
+        a = cp.sin(dlat/2)**2 + cp.cos(lat1) * cp.cos(lat2) * cp.sin(dlon/2)**2
+        c = 2 * cp.arcsin(cp.sqrt(cp.clip(a, 0, 1)))
+        df['distance_km'] = (6371 * c).astype('float32')  # Earth radius in km
     
-    for col in ['V1', 'V14', 'V17']:
-        if col in df.columns:
-            df[f'{col}_squared'] = df[col] ** 2
+    # === Categorical encoding ===
+    if 'category' in df.columns:
+        # Map category to numeric
+        df['category_encoded'] = df['category'].map(CATEGORY_MAP).fillna(-1).astype('int8')
+    
+    if 'state' in df.columns:
+        df['state_encoded'] = df['state'].map(STATE_MAP).fillna(-1).astype('int8')
+    
+    if 'gender' in df.columns:
+        df['gender_encoded'] = (df['gender'] == 'M').astype('int8')
+    
+    # === City population features ===
+    if 'city_pop' in df.columns:
+        df['city_pop_log'] = cp.log1p(df['city_pop'].values).astype('float32')
+    
+    # === ZIP code features ===
+    if 'zip' in df.columns:
+        # Extract region from ZIP (first digit)
+        df['zip_region'] = (df['zip'] // 10000).astype('int8')
     
     return df
 
@@ -198,7 +248,6 @@ class DataPrepService:
             log("No stable parquet files found")
             return False
         
-        # Sample if needed
         if len(files) > self.config.max_files:
             step = len(files) // self.config.max_files
             files = files[::step][:self.config.max_files]
@@ -209,17 +258,13 @@ class DataPrepService:
         file_paths = [str(f) for f in files]
         
         try:
-            # Load distributed across GPUs
             start = time.time()
             log(f"  [{', '.join(self.gpu_names)}] Loading data...")
             
             ddf = dask_cudf.read_parquet(file_paths, split_row_groups=True)
             
-            # Repartition to ensure work is split across GPUs
             n_partitions = self.gpu_count * 4
             ddf = ddf.repartition(npartitions=n_partitions)
-            
-            # Persist to distribute across GPUs
             ddf = ddf.persist()
             wait(ddf)
             
@@ -227,18 +272,23 @@ class DataPrepService:
             load_time = time.time() - start
             log(f"  [{', '.join(self.gpu_names)}] Loaded {total_rows:,} records in {load_time:.1f}s")
             
-            # Feature engineering on each partition (runs on whichever GPU holds that partition)
+            # Feature engineering
             start = time.time()
             log(f"  [{', '.join(self.gpu_names)}] Feature engineering...")
             
             ddf['prep_timestamp'] = float(time.time())
             
-            # Apply feature engineering to each partition
+            # Define output meta with new features
             meta = ddf._meta.copy()
-            for col in ['amount_log', 'amount_scaled', 'hour_of_day', 'is_night', 
-                        'V1_V2_interaction', 'V1_squared', 'V14_squared', 'V17_squared']:
-                meta[col] = 0.0
-            meta['is_night'] = np.int8(0)
+            new_cols = ['amt_log', 'amt_scaled', 'hour_of_day', 'day_of_week', 
+                       'is_weekend', 'is_night', 'distance_km', 'category_encoded',
+                       'state_encoded', 'gender_encoded', 'city_pop_log', 'zip_region']
+            for col in new_cols:
+                if col in ['hour_of_day', 'day_of_week', 'is_weekend', 'is_night', 
+                          'category_encoded', 'state_encoded', 'gender_encoded', 'zip_region']:
+                    meta[col] = np.int8(0)
+                else:
+                    meta[col] = np.float32(0)
             
             ddf = ddf.map_partitions(engineer_features_partition, meta=meta)
             ddf = ddf.persist()
@@ -247,18 +297,18 @@ class DataPrepService:
             eng_time = time.time() - start
             log(f"  [{', '.join(self.gpu_names)}] Features added in {eng_time:.1f}s")
             
-            # Compute to single DataFrame for writing
+            # Merge partitions
             start = time.time()
             log(f"  Merging partitions...")
             df = ddf.compute()
             
-            # Add transaction IDs
-            df['transaction_id'] = cp.arange(len(df), dtype=cp.int64)
+            # Add transaction IDs if not present
+            if 'transaction_id' not in df.columns:
+                df['transaction_id'] = cp.arange(len(df), dtype=cp.int64)
             
             merge_time = time.time() - start
             log(f"  Merged {len(df):,} records in {merge_time:.1f}s")
             
-            # Write output
             self._write_output(df, run_name)
             
             del df, ddf
@@ -335,7 +385,8 @@ class DataPrepService:
         
         # Feature engineering
         start = time.time()
-        df['transaction_id'] = cp.arange(len(df), dtype=cp.int64)
+        if 'transaction_id' not in df.columns:
+            df['transaction_id'] = cp.arange(len(df), dtype=cp.int64)
         df['prep_timestamp'] = float(time.time())
         df = engineer_features_partition(df)
         log(f"  [{gpu_name}] Features added in {time.time()-start:.1f}s")
@@ -364,10 +415,21 @@ class DataPrepService:
         
         # Metadata
         pf = pq.ParquetFile(output_file)
-        exclude = ['transaction_id', 'prep_timestamp', 'Class']
-        meta = {"run_name": run_name, "timestamp": datetime.now().isoformat(),
-                "columns": pf.schema.names, "record_count": pf.metadata.num_rows,
-                "feature_columns": [c for c in pf.schema.names if c not in exclude]}
+        
+        # Define feature columns (exclude IDs, timestamps, raw categoricals)
+        exclude = ['transaction_id', 'prep_timestamp', 'is_fraud', 'trans_num', 
+                   'trans_date_trans_time', 'cc_num', 'merchant', 'first', 'last',
+                   'street', 'city', 'job', 'dob', 'category', 'state', 'gender']
+        feature_columns = [c for c in pf.schema.names if c not in exclude]
+        
+        meta = {
+            "run_name": run_name,
+            "timestamp": datetime.now().isoformat(),
+            "columns": pf.schema.names,
+            "record_count": pf.metadata.num_rows,
+            "feature_columns": feature_columns,
+            "target_column": "is_fraud"
+        }
         with open(self.output_path / f"metadata_{run_name}.json", 'w') as f:
             json.dump(meta, f, indent=2)
     
@@ -378,7 +440,6 @@ class DataPrepService:
         log(f"Processing: {run_name}")
         
         try:
-            # Lazy init Dask on first job
             if self.multi_gpu_available and not self.multi_gpu:
                 self._init_dask()
             
@@ -412,7 +473,7 @@ class DataPrepService:
             log("Watching for new runs...")
             last_status = time.time()
             processed_count = 0
-            idle_poll = 10  # Longer sleep when idle to reduce CPU
+            idle_poll = 10
             
             while not STOP_FLAG:
                 runs = self.get_new_runs()
