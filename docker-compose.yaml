@@ -76,6 +76,7 @@ services:
       - PREP_OUTPUT_DIR=/data/input
       - FA_MOUNT=/data/models
       - FEATURES_FILE=${FEATURES_FILE:-}
+    user: root
     deploy:
       resources:
         reservations:

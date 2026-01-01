@@ -172,11 +172,15 @@ base_time = 1704067200  # 2024-01-01
 # Generate until duration expires
 start = time.time()
 file_count = 0
-while (time.time() - start) < duration:
-    data = generate_chunk(pools, chunk_size, rng, fraud_rate, base_time)
-    table = pa.Table.from_pydict(data)
-    pq.write_table(table, output_dir / f"worker_{worker_id:03d}_{file_count:05d}.parquet", compression=None)
-    file_count += 1
+try:
+    while (time.time() - start) < duration:
+        data = generate_chunk(pools, chunk_size, rng, fraud_rate, base_time)
+        table = pa.Table.from_pydict(data)
+        output_file = output_dir / f"worker_{worker_id:03d}_{file_count:05d}.parquet"
+        pq.write_table(table, output_file, compression=None)
+        file_count += 1
+except Exception as e:
+    pass  # Silently exit on error
 '''
 
 

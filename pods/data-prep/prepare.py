@@ -209,6 +209,19 @@ class DataPrepService:
         runs = sorted(runs, key=lambda x: x.name)
         return [runs[-1]] if self.config.latest_only and runs else runs
     
+    def _validate_parquet(self, filepath: Path) -> bool:
+        """Check if parquet file is valid (has proper footer)."""
+        try:
+            # Quick validation: check file size and magic bytes
+            if filepath.stat().st_size < 100:
+                return False
+            with open(filepath, 'rb') as f:
+                # Check parquet magic bytes at end of file
+                f.seek(-4, 2)
+                return f.read(4) == b'PAR1'
+        except:
+            return False
+    
     def process_run(self, run_dir: Path) -> bool:
         """Process a single data run."""
         run_name = run_dir.name
@@ -218,9 +231,18 @@ class DataPrepService:
         log(f"Processing: {run_name}")
         
         # Find parquet files
-        files = sorted(run_dir.glob("worker_*.parquet"))
-        if not files:
+        all_files = sorted(run_dir.glob("worker_*.parquet"))
+        if not all_files:
             log("  No parquet files found")
+            return False
+        
+        # Validate files (skip corrupted)
+        files = [f for f in all_files if self._validate_parquet(f)]
+        if len(files) < len(all_files):
+            log(f"  Skipped {len(all_files) - len(files)} corrupted files")
+        
+        if not files:
+            log("  No valid parquet files")
             return False
         
         # Sample if too many files

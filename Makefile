@@ -10,7 +10,7 @@ MODEL_REPO ?= ./model_repository
 
 # Pipeline settings
 DURATION ?= 60
-NUM_WORKERS ?= 128
+NUM_WORKERS ?= 64
 MAX_FILES ?= 100
 
 help:
@@ -46,6 +46,7 @@ pipeline: build
 	@echo "=========================================="
 	@echo "Starting Full Pipeline"
 	@echo "=========================================="
+	@mkdir -p $(MODEL_REPO)
 	@echo ""
 	@echo "[1/3] Data Generation ($(DURATION)s)..."
 	docker compose run --rm \
