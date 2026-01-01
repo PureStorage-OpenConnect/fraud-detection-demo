@@ -27,7 +27,7 @@ graph LR
     D -->|Alerts| E[Pod 5<br/>Notification]
     
     FB[(FlashBlade)] -.-> A
-    FB -.-> B
+    FB -.-> B 
     FA[(FlashArray)] -.-> C
     FA -.-> D
     

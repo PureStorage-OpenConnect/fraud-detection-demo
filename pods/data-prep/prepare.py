@@ -10,6 +10,7 @@ import sys
 import time
 import json
 import signal
+import gc
 from pathlib import Path
 from datetime import datetime
 from typing import List, Set
@@ -51,6 +52,13 @@ def signal_handler(signum, frame):
     global STOP_FLAG
     log("Shutdown signal received")
     STOP_FLAG = True
+
+
+def free_gpu_memory():
+    """Aggressively free GPU memory."""
+    gc.collect()
+    cp.get_default_memory_pool().free_all_blocks()
+    cp.get_default_pinned_memory_pool().free_all_blocks()
 
 
 @dataclass
@@ -148,6 +156,7 @@ class DataPrepService:
         log(f"Input:  {self.input_path}")
         log(f"Output: {self.output_path}")
         log(f"GPUs:   {', '.join(self.gpu_names)}")
+        log(f"Max files per run: {config.max_files}")
         log("=" * 60)
     
     def _load_state(self) -> Set[str]:
@@ -213,13 +222,25 @@ class DataPrepService:
         """Check if parquet file is valid (has proper footer)."""
         try:
             # Quick validation: check file size and magic bytes
-            if filepath.stat().st_size < 100:
+            size = filepath.stat().st_size
+            if size < 100:
+                log(f"  Skipping {filepath.name}: too small ({size} bytes)")
                 return False
             with open(filepath, 'rb') as f:
+                # Check parquet magic bytes at start
+                magic_start = f.read(4)
+                if magic_start != b'PAR1':
+                    log(f"  Skipping {filepath.name}: invalid header")
+                    return False
                 # Check parquet magic bytes at end of file
                 f.seek(-4, 2)
-                return f.read(4) == b'PAR1'
-        except:
+                magic_end = f.read(4)
+                if magic_end != b'PAR1':
+                    log(f"  Skipping {filepath.name}: invalid footer (corrupted)")
+                    return False
+            return True
+        except Exception as e:
+            log(f"  Skipping {filepath.name}: {e}")
             return False
     
     def process_run(self, run_dir: Path) -> bool:
@@ -236,22 +257,31 @@ class DataPrepService:
             log("  No parquet files found")
             return False
         
+        log(f"  Found {len(all_files)} parquet files, validating...")
+        
         # Validate files (skip corrupted)
-        files = [f for f in all_files if self._validate_parquet(f)]
-        if len(files) < len(all_files):
-            log(f"  Skipped {len(all_files) - len(files)} corrupted files")
+        files = []
+        corrupted_count = 0
+        for f in all_files:
+            if self._validate_parquet(f):
+                files.append(f)
+            else:
+                corrupted_count += 1
+        
+        if corrupted_count > 0:
+            log(f"  Skipped {corrupted_count} corrupted/invalid files")
         
         if not files:
-            log("  No valid parquet files")
+            log("  No valid parquet files to process")
             return False
         
-        # Sample if too many files
+        log(f"  {len(files)} valid files")
+        
+        # Sample if too many files (memory management)
         if len(files) > self.config.max_files:
             step = len(files) // self.config.max_files
             files = files[::step][:self.config.max_files]
-            log(f"  Sampling {len(files)} files")
-        else:
-            log(f"  Loading {len(files)} files")
+            log(f"  Sampling {len(files)} files to fit in memory")
         
         try:
             # Initialize Dask if needed
@@ -281,13 +311,37 @@ class DataPrepService:
                 
                 # Collect to single DataFrame
                 df = ddf.compute()
+                del ddf
+                free_gpu_memory()
             else:
-                # Single GPU loading
+                # Single GPU loading - process in batches to manage memory
+                batch_size = 25  # Process 25 files at a time
                 parts = []
-                for f in files:
-                    parts.append(cudf.read_parquet(str(f)))
+                
+                for i in range(0, len(files), batch_size):
+                    batch_files = files[i:i+batch_size]
+                    batch_parts = []
+                    for f in batch_files:
+                        try:
+                            batch_parts.append(cudf.read_parquet(str(f)))
+                        except Exception as e:
+                            log(f"  Error reading {f.name}: {e}")
+                            continue
+                    
+                    if batch_parts:
+                        batch_df = cudf.concat(batch_parts, ignore_index=True)
+                        parts.append(batch_df)
+                        del batch_parts
+                        free_gpu_memory()
+                
+                if not parts:
+                    log("  No data loaded successfully")
+                    return False
+                
                 df = cudf.concat(parts, ignore_index=True)
                 del parts
+                free_gpu_memory()
+                
                 log(f"  Loaded {len(df):,} records in {time.time()-load_start:.1f}s")
                 
                 # Feature engineering
@@ -303,21 +357,25 @@ class DataPrepService:
             log(f"  Writing {len(df):,} records...")
             
             write_start = time.time()
+            
+            # Convert to pandas in chunks to manage memory
+            record_count = len(df)
             pdf = df.to_pandas()
-            record_count = len(pdf)
             del df
-            cp.get_default_memory_pool().free_all_blocks()
+            free_gpu_memory()
             
             pdf.to_parquet(str(output_file), compression='snappy', index=False)
             size_mb = output_file.stat().st_size / (1024**2)
             log(f"  Wrote {size_mb:.0f} MB in {time.time()-write_start:.1f}s")
             del pdf
+            gc.collect()
             
             # Save metadata
             meta = {
                 "run_name": run_name,
                 "timestamp": datetime.now().isoformat(),
                 "record_count": record_count,
+                "file_size_mb": size_mb,
             }
             with open(self.output_path / f"metadata_{run_name}.json", 'w') as f:
                 json.dump(meta, f, indent=2)
@@ -333,7 +391,7 @@ class DataPrepService:
             log(f"ERROR: {e}")
             import traceback
             traceback.print_exc()
-            cp.get_default_memory_pool().free_all_blocks()
+            free_gpu_memory()
             return False
     
     def run(self):
@@ -348,6 +406,8 @@ class DataPrepService:
             if STOP_FLAG:
                 break
             self.process_run(run_dir)
+            # Free memory between runs
+            free_gpu_memory()
         
         log("=" * 60)
         log("Processing complete")
@@ -372,6 +432,7 @@ def main():
         service.run()
     finally:
         service._cleanup_dask()
+        free_gpu_memory()
 
 
 if __name__ == "__main__":

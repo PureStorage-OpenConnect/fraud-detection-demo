@@ -107,7 +107,7 @@ services:
   # ============================================================================
   inference:
     image: nvcr.io/nvidia/tritonserver:24.02-py3
-    container_name: fraud-inference
+    container_name: frosty-hypatia
     ports:
       - "8000:8000"   # HTTP
       - "8001:8001"   # gRPC
