@@ -43,7 +43,9 @@ class ModelTrainer:
     
     def __init__(self, input_dir: str, output_dir: str):
         self.input_path = Path(input_dir)
-        self.output_path = Path(output_dir) / "model_repository"
+        # FIX: Output directly to model_repository mount, don't add subdirectory
+        # Triton expects models at /models/fraud_xgboost/, not /models/model_repository/fraud_xgboost/
+        self.output_path = Path(output_dir)
         self.output_path.mkdir(parents=True, exist_ok=True)
         
         log.info("=" * 60)
@@ -85,7 +87,6 @@ class ModelTrainer:
         max_records = 10_000_000
         if len(df) > max_records:
             log.info(f"Subsampling {max_records:,} from {len(df):,} records")
-            # Stratified sampling to preserve fraud ratio
             fraud_df = df[df['is_fraud'] == 1]
             normal_df = df[df['is_fraud'] == 0]
             
@@ -97,9 +98,8 @@ class ModelTrainer:
             normal_sample = normal_df.sample(n=min(n_normal, len(normal_df)), random_state=42)
             
             df = cudf.concat([fraud_sample, normal_sample], ignore_index=True)
-            df = df.sample(frac=1, random_state=42)  # Shuffle
+            df = df.sample(frac=1, random_state=42)
         
-        # Train/test split (80/20)
         split_idx = int(len(df) * 0.8)
         train_df = df.iloc[:split_idx]
         test_df = df.iloc[split_idx:]
@@ -118,17 +118,14 @@ class ModelTrainer:
         """Train XGBoost classifier."""
         log.info("Training XGBoost...")
         
-        # Handle class imbalance
         fraud_count = float(y_train.sum())
         normal_count = len(y_train) - fraud_count
         scale_pos_weight = normal_count / max(fraud_count, 1)
         log.info(f"  Scale pos weight: {scale_pos_weight:.2f}")
         
-        # Create DMatrix
         dtrain = xgb.DMatrix(X_train, label=y_train)
         dtest = xgb.DMatrix(X_test, label=y_test)
         
-        # XGBoost parameters
         params = {
             'objective': 'binary:logistic',
             'eval_metric': ['auc', 'logloss'],
@@ -141,7 +138,6 @@ class ModelTrainer:
             'tree_method': 'hist',
         }
         
-        # Train
         model = xgb.train(
             params, dtrain,
             num_boost_round=100,
@@ -150,13 +146,11 @@ class ModelTrainer:
             verbose_eval=10
         )
         
-        # Evaluate
         y_pred = model.predict(dtest)
         y_pred_binary = (y_pred > 0.5).astype(int)
         
         accuracy = float((y_pred_binary == cp.asnumpy(y_test)).mean())
         
-        # Fraud class metrics
         fraud_mask = cp.asnumpy(y_test) == 1
         if fraud_mask.sum() > 0:
             tp = ((y_pred_binary == 1) & fraud_mask).sum()
@@ -179,16 +173,13 @@ class ModelTrainer:
         version_dir = model_dir / "1"
         version_dir.mkdir(parents=True, exist_ok=True)
         
-        # Save model (FIL backend expects xgboost.json)
         model_file = version_dir / "xgboost.json"
         model.save_model(str(model_file))
         log.info(f"Model saved: {model_file}")
         
-        # Save feature names
         with open(model_dir / "feature_names.json", 'w') as f:
             json.dump(feature_names, f, indent=2)
         
-        # Create Triton config
         config = f'''name: "fraud_xgboost"
 backend: "fil"
 max_batch_size: 32768
@@ -228,6 +219,14 @@ parameters [
         with open(config_file, 'w') as f:
             f.write(config)
         log.info(f"Config saved: {config_file}")
+        
+        log.info(f"Model repository structure:")
+        log.info(f"  {self.output_path}/")
+        log.info(f"    fraud_xgboost/")
+        log.info(f"      config.pbtxt")
+        log.info(f"      feature_names.json")
+        log.info(f"      1/")
+        log.info(f"        xgboost.json")
     
     def run(self, features_file: str = None):
         """Execute training pipeline."""

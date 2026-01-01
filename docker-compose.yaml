@@ -1,6 +1,8 @@
 # Financial Fraud Detection Pipeline
 # Demonstrates Pure Storage FlashBlade/FlashArray with NVIDIA GPU acceleration
 #
+# All paths are configured in .env file (single source of truth)
+#
 # Usage:
 #   make pipeline    # Run full pipeline (pods 1-4)
 #   make clean-data  # Remove generated data
@@ -10,12 +12,15 @@ services:
   # ============================================================================
   # Pod 1: Data Generator
   # Generates synthetic credit card transactions at high throughput (2+ GB/s)
+  # Input:  None
+  # Output: ${FB_DATA}/run_YYYYMMDD_HHMMSS/*.parquet
   # ============================================================================
   data-gather:
     build: ./pods/data-gather
     container_name: fraud-data-gather
     volumes:
-      - ${FB_DATA:-/mnt/fsaai-shared/ebiser/fraud-data}:/data/output
+      # Mount FlashBlade for high-throughput writes
+      - ${FB_DATA}:/data/output
     environment:
       - OUTPUT_DIR=/data/output
       - NUM_WORKERS=${NUM_WORKERS:-128}
@@ -37,20 +42,24 @@ services:
   # ============================================================================
   # Pod 2: Feature Engineering (Multi-GPU)
   # RAPIDS cuDF/Dask for GPU-accelerated data preparation
+  # Input:  ${FB_DATA}/run_*/worker_*.parquet (from Pod 1)
+  # Output: ${FB_PREP}/features_run_*.parquet
   # ============================================================================
   data-prep:
     build: ./pods/data-prep
     container_name: fraud-data-prep
     volumes:
-      - ${FB_DATA:-/mnt/fsaai-shared/ebiser/fraud-data}:/data/input:ro
-      - ${FB_PREP:-/mnt/fsaai-shared/ebiser/prep-output}:/data/output
+      # Read from Pod 1 output
+      - ${FB_DATA}:/data/input:ro
+      # Write features to prep output
+      - ${FB_PREP}:/data/output
     environment:
       - INPUT_DIR=/data/input
       - OUTPUT_DIR=/data/output
       - BATCH_MODE=true
-      - LATEST_ONLY=true
-      - MAX_FILES_PER_RUN=${MAX_FILES:-100}
-      - USE_MULTI_GPU=true
+      - LATEST_ONLY=${LATEST_ONLY:-true}
+      - MAX_FILES_PER_RUN=${MAX_FILES_PER_RUN:-100}
+      - USE_MULTI_GPU=${USE_MULTI_GPU:-true}
     shm_size: '16gb'
     deploy:
       resources:
@@ -65,13 +74,17 @@ services:
   # ============================================================================
   # Pod 3: Model Training (GPU)
   # XGBoost with GPU acceleration for fraud classification
+  # Input:  ${FB_PREP}/features_*.parquet (from Pod 2)
+  # Output: ${MODEL_REPO}/fraud_xgboost/ (Triton model repository)
   # ============================================================================
   model-build:
     build: ./pods/model-build
     container_name: fraud-model-build
     volumes:
-      - ${FB_PREP:-/mnt/fsaai-shared/ebiser/prep-output}:/data/input:ro
-      - ${MODEL_REPO:-./model_repository}:/data/models
+      # Read prepared features from Pod 2
+      - ${FB_PREP}:/data/input:ro
+      # Write model directly to Triton model repository
+      - ${MODEL_REPO}:/data/models
     environment:
       - PREP_OUTPUT_DIR=/data/input
       - FA_MOUNT=/data/models
@@ -90,17 +103,19 @@ services:
   # ============================================================================
   # Pod 4: Inference Server (GPU)
   # NVIDIA Triton with FIL backend for real-time fraud detection
+  # Input:  ${MODEL_REPO}/fraud_xgboost/ (from Pod 3)
   # ============================================================================
   inference:
     image: nvcr.io/nvidia/tritonserver:24.02-py3
-    container_name: frosty-hypatia
+    container_name: fraud-inference
     ports:
       - "8000:8000"   # HTTP
       - "8001:8001"   # gRPC
       - "8002:8002"   # Metrics
     volumes:
-      - ${MODEL_REPO:-./model_repository}:/models:ro
-    command: ["tritonserver", "--model-repository=/models"]
+      # Mount model repository - must match Pod 3 output location
+      - ${MODEL_REPO}:/models:ro
+    command: ["tritonserver", "--model-repository=/models", "--strict-model-config=false", "--log-verbose=1"]
     deploy:
       resources:
         reservations:
