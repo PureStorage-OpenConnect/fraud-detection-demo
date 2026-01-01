@@ -279,7 +279,7 @@ class DataPrepService:
                 wait(ddf)
                 log(f"  Features added in {time.time()-eng_start:.1f}s")
                 
-                # Collect to single GPU
+                # Collect to single DataFrame
                 df = ddf.compute()
             else:
                 # Single GPU loading
@@ -304,6 +304,7 @@ class DataPrepService:
             
             write_start = time.time()
             pdf = df.to_pandas()
+            record_count = len(pdf)
             del df
             cp.get_default_memory_pool().free_all_blocks()
             
@@ -313,12 +314,10 @@ class DataPrepService:
             del pdf
             
             # Save metadata
-            pf = pq.ParquetFile(output_file)
             meta = {
                 "run_name": run_name,
                 "timestamp": datetime.now().isoformat(),
-                "record_count": pf.metadata.num_rows,
-                "columns": pf.schema.names,
+                "record_count": record_count,
             }
             with open(self.output_path / f"metadata_{run_name}.json", 'w') as f:
                 json.dump(meta, f, indent=2)
