@@ -71,6 +71,14 @@ class Config:
     use_multi_gpu: bool = True
 
 
+# Columns to drop (strings not needed for ML, cause cuDF size limit issues)
+# Note: category, state, gender are encoded first, then dropped
+STRING_COLUMNS_TO_DROP = [
+    'merchant', 'first', 'last', 'street', 'city', 'job', 'dob', 'trans_num',
+    'trans_date_trans_time', 'category', 'state', 'gender'
+]
+
+
 def engineer_features(df):
     """Add engineered features to dataframe."""
     # Amount features
@@ -120,6 +128,11 @@ def engineer_features(df):
     
     if 'zip' in df.columns:
         df['zip_region'] = (df['zip'] / 10000).astype('int8')
+    
+    # Drop string columns at the end to avoid cuDF 2GB limit during concat
+    cols_to_drop = [c for c in STRING_COLUMNS_TO_DROP if c in df.columns]
+    if cols_to_drop:
+        df = df.drop(columns=cols_to_drop)
     
     return df
 
@@ -299,7 +312,14 @@ class DataPrepService:
                 
                 # Feature engineering
                 eng_start = time.time()
+                
+                # Build meta that reflects: original cols - dropped strings + new features
                 meta = ddf._meta.copy()
+                # Drop string columns from meta
+                string_cols_in_meta = [c for c in STRING_COLUMNS_TO_DROP if c in meta.columns]
+                if string_cols_in_meta:
+                    meta = meta.drop(columns=string_cols_in_meta)
+                # Add new feature columns
                 for col in ['amt_log', 'amt_scaled', 'hour_of_day', 'day_of_week', 
                            'is_weekend', 'is_night', 'distance_km', 'category_encoded',
                            'state_encoded', 'gender_encoded', 'city_pop_log', 'zip_region']:
@@ -309,7 +329,7 @@ class DataPrepService:
                 wait(ddf)
                 log(f"  Features added in {time.time()-eng_start:.1f}s")
                 
-                # Collect to single DataFrame
+                # Collect to single DataFrame (strings already dropped in engineer_features)
                 df = ddf.compute()
                 del ddf
                 free_gpu_memory()
