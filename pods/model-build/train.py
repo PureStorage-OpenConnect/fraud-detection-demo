@@ -81,6 +81,24 @@ class ModelTrainer:
         # Handle missing values
         df = df.fillna(0)
         
+        # Subsample if too large (GPU memory limit ~10M records)
+        max_records = 10_000_000
+        if len(df) > max_records:
+            log.info(f"Subsampling {max_records:,} from {len(df):,} records")
+            # Stratified sampling to preserve fraud ratio
+            fraud_df = df[df['is_fraud'] == 1]
+            normal_df = df[df['is_fraud'] == 0]
+            
+            fraud_ratio = len(fraud_df) / len(df)
+            n_fraud = int(max_records * fraud_ratio)
+            n_normal = max_records - n_fraud
+            
+            fraud_sample = fraud_df.sample(n=min(n_fraud, len(fraud_df)), random_state=42)
+            normal_sample = normal_df.sample(n=min(n_normal, len(normal_df)), random_state=42)
+            
+            df = cudf.concat([fraud_sample, normal_sample], ignore_index=True)
+            df = df.sample(frac=1, random_state=42)  # Shuffle
+        
         # Train/test split (80/20)
         split_idx = int(len(df) * 0.8)
         train_df = df.iloc[:split_idx]
