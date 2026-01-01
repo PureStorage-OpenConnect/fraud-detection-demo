@@ -111,10 +111,10 @@ stop:
 # Clean generated data (preserves images)
 clean-data:
 	@echo "Cleaning generated data..."
-	rm -rf $(FB_DATA)/run_*
-	rm -rf $(FB_PREP)/features_*.parquet
-	rm -rf $(FB_PREP)/metadata_*.json
-	rm -rf $(FB_PREP)/.prep_state.json
+	sudo rm -rf $(FB_DATA)/run_*
+	sudo rm -rf $(FB_PREP)/features_*.parquet
+	sudo rm -rf $(FB_PREP)/metadata_*.json
+	sudo rm -rf $(FB_PREP)/.prep_state.json
 	rm -rf $(MODEL_REPO)
 	@echo "Data cleaned"
 
