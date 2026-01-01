@@ -11,7 +11,7 @@ MODEL_REPO ?= ./model_repository
 # Pipeline settings
 DURATION ?= 60
 NUM_WORKERS ?= 64
-MAX_FILES ?= 100
+MAX_FILES ?= 50
 
 help:
 	@echo "Financial Fraud Detection Pipeline"
