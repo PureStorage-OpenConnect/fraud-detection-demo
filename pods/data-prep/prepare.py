@@ -517,8 +517,6 @@ class DataPrepService:
         log(f"  {'Feature Engineering':<20} {cpu_eng_time:<12.2f} {gpu_eng_time:<12.2f} {eng_speedup:<10.1f}x")
         log(f"  {'-'*20} {'-'*12} {'-'*12} {'-'*10}")
         log(f"  {'TOTAL':<20} {cpu_total:<12.2f} {gpu_total:<12.2f} {total_speedup:<10.1f}x")
-        log("")
-        log(f"  🚀 GPU is {total_speedup:.1f}x faster than CPU!")
         log("=" * 70)
         
         # =================================================================
