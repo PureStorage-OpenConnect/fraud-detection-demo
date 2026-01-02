@@ -1,5 +1,5 @@
-# Financial Fraud Detection Pipeline
-# Pure Storage FlashBlade/FlashArray + NVIDIA GPU Demo
+# Fraud Detection Demo
+# Pure Storage FlashBlade/FlashArray + NVIDIA GPU
 #
 # Configuration: All paths defined in .env (single source of truth)
 
@@ -11,7 +11,7 @@ export
 FB_MOUNT ?= /mnt/fsaai-shared/ebiser
 FB_DATA ?= $(FB_MOUNT)/fraud-data
 FB_PREP ?= $(FB_MOUNT)/prep-output
-MODEL_REPO ?= $(PWD)/model_repository
+FA_MODEL_REPO ?= $(PWD)/model_repository
 
 # Pipeline settings (can override via command line or .env)
 DURATION_SECONDS ?= 60
@@ -23,7 +23,7 @@ FRAUD_RATE ?= 0.005
 .PHONY: help build pipeline clean-data clean-all test inference stop env-check
 
 help:
-	@echo "Financial Fraud Detection Pipeline"
+	@echo "Fraud Detection Demo"
 	@echo ""
 	@echo "Usage:"
 	@echo "  make build       Build all containers"
@@ -37,13 +37,13 @@ help:
 	@echo ""
 	@echo "Individual pods:"
 	@echo "  make pod1        Run data generator"
-	@echo "  make pod2        Run feature engineering"
+	@echo "  make pod2        Run feature engineering (CPU vs GPU comparison)"
 	@echo "  make pod3        Run model training"
 	@echo ""
 	@echo "Configuration (from .env):"
 	@echo "  FB_DATA=$(FB_DATA)"
 	@echo "  FB_PREP=$(FB_PREP)"
-	@echo "  MODEL_REPO=$(MODEL_REPO)"
+	@echo "  FA_MODEL_REPO=$(FA_MODEL_REPO)"
 	@echo "  DURATION_SECONDS=$(DURATION_SECONDS)s NUM_WORKERS=$(NUM_WORKERS)"
 
 # Verify environment and paths
@@ -57,14 +57,14 @@ env-check:
 	@test -d $(FB_PREP) && echo "    ✓ exists" || echo "    ✗ MISSING - run: sudo mkdir -p $(FB_PREP)"
 	@echo ""
 	@echo "Model repository:"
-	@echo "  MODEL_REPO: $(MODEL_REPO)"
-	@test -d $(MODEL_REPO) && echo "    ✓ exists" || echo "    ✗ MISSING - will be created during pipeline"
+	@echo "  FA_MODEL_REPO: $(FA_MODEL_REPO)"
+	@test -d $(FA_MODEL_REPO) && echo "    ✓ exists" || echo "    ✗ MISSING - will be created during pipeline"
 	@echo ""
 	@echo "Data flow:"
 	@echo "  Pod 1 → $(FB_DATA)/run_*/*.parquet"
 	@echo "  Pod 2 → $(FB_PREP)/features_*.parquet"
-	@echo "  Pod 3 → $(MODEL_REPO)/fraud_xgboost/"
-	@echo "  Pod 4 ← $(MODEL_REPO)/fraud_xgboost/"
+	@echo "  Pod 3 → $(FA_MODEL_REPO)/fraud_xgboost/"
+	@echo "  Pod 4 ← $(FA_MODEL_REPO)/fraud_xgboost/"
 
 build:
 	@echo "Building all containers..."
@@ -79,13 +79,13 @@ pipeline: build
 	@echo "Paths:"
 	@echo "  FB_DATA:    $(FB_DATA)"
 	@echo "  FB_PREP:    $(FB_PREP)"
-	@echo "  MODEL_REPO: $(MODEL_REPO)"
+	@echo "  FA_MODEL_REPO: $(FA_MODEL_REPO)"
 	@echo ""
-	@mkdir -p $(MODEL_REPO)
+	@mkdir -p $(FA_MODEL_REPO)
 	@echo "[1/3] Data Generation ($(DURATION_SECONDS)s)..."
 	docker compose run --rm data-gather
 	@echo ""
-	@echo "[2/3] Feature Engineering..."
+	@echo "[2/3] Feature Engineering (CPU vs GPU comparison)..."
 	docker compose run --rm data-prep
 	@echo ""
 	@echo "[3/3] Model Training..."
@@ -96,7 +96,7 @@ pipeline: build
 	@echo "=========================================="
 	@echo ""
 	@echo "Verify model output:"
-	@ls -la $(MODEL_REPO)/fraud_xgboost/ 2>/dev/null || echo "  Warning: Model not found at $(MODEL_REPO)/fraud_xgboost/"
+	@ls -la $(FA_MODEL_REPO)/fraud_xgboost/ 2>/dev/null || echo "  Warning: Model not found at $(FA_MODEL_REPO)/fraud_xgboost/"
 	@echo ""
 	@echo "Start inference: make inference"
 
@@ -110,19 +110,19 @@ pod2:
 	docker compose run --rm data-prep
 
 pod3:
-	@mkdir -p $(MODEL_REPO)
+	@mkdir -p $(FA_MODEL_REPO)
 	docker compose run --rm model-build
 
 # Start inference server
 inference:
 	@echo "Starting Triton Inference Server..."
-	@echo "Model repository: $(MODEL_REPO)"
-	@if [ ! -d "$(MODEL_REPO)/fraud_xgboost" ]; then \
-		echo "ERROR: Model not found at $(MODEL_REPO)/fraud_xgboost/"; \
+	@echo "Model repository: $(FA_MODEL_REPO)"
+	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ]; then \
+		echo "ERROR: Model not found at $(FA_MODEL_REPO)/fraud_xgboost/"; \
 		echo "Run 'make pipeline' first to train the model."; \
 		exit 1; \
 	fi
-	@ls -la $(MODEL_REPO)/fraud_xgboost/
+	@ls -la $(FA_MODEL_REPO)/fraud_xgboost/
 	docker compose up -d inference
 	@echo ""
 	@echo "Waiting for server to be ready..."
@@ -149,7 +149,7 @@ status:
 	@docker compose ps
 	@echo ""
 	@echo "=== Model Repository ==="
-	@ls -la $(MODEL_REPO)/ 2>/dev/null || echo "  No models found"
+	@ls -la $(FA_MODEL_REPO)/ 2>/dev/null || echo "  No models found"
 	@echo ""
 	@echo "=== Triton Health ==="
 	@curl -s http://localhost:8000/v2/health/ready && echo "Ready" || echo "Not ready"
@@ -165,7 +165,7 @@ clean-data:
 	sudo rm -rf $(FB_PREP)/features_*.parquet 2>/dev/null || true
 	sudo rm -rf $(FB_PREP)/metadata_*.json 2>/dev/null || true
 	sudo rm -rf $(FB_PREP)/.prep_state.json 2>/dev/null || true
-	rm -rf $(MODEL_REPO) 2>/dev/null || true
+	rm -rf $(FA_MODEL_REPO) 2>/dev/null || true
 	@echo "Data cleaned"
 
 # Full cleanup

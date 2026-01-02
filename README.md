@@ -1,4 +1,4 @@
-# Financial Fraud Detection Pipeline
+# Fraud Detection Demo
 
 [![NVIDIA](https://img.shields.io/badge/NVIDIA-L40S-76B900?logo=nvidia)](https://www.nvidia.com/)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
@@ -15,6 +15,7 @@ This project implements a financial fraud detection pipeline as a 5-pod containe
 **Key Demonstrations:**
 - Pure Storage FlashBlade parallel I/O at 2+ GB/s for data generation
 - Multi-GPU processing with RAPIDS cuDF and Dask
+- CPU vs GPU performance comparison showing storage isn't the bottleneck
 - End-to-end ML pipeline from data generation to real-time inference
 
 ## Architecture
@@ -51,7 +52,7 @@ graph LR
 | Pod | Container | GPU | Description |
 |-----|-----------|-----|-------------|
 | 1 | `data-gather` | - | Generates synthetic transaction data at 2+ GB/s |
-| 2 | `data-prep` | Multi-GPU | RAPIDS cuDF/Dask feature engineering |
+| 2 | `data-prep` | Multi-GPU | RAPIDS cuDF/Dask feature engineering (CPU vs GPU comparison) |
 | 3 | `model-build` | GPU | Trains XGBoost fraud detection model |
 | 4 | `inference` | GPU | NVIDIA Triton Inference Server |
 | 5 | `notification` | - | Fraud alert webhook service |
@@ -96,7 +97,7 @@ Model Repository: ./model_repository/
 ```bash
 # Clone repository
 git clone <repository-url>
-cd financial-fraud-demo
+cd fraud.detection.demo
 
 # Create data directories
 sudo mkdir -p /mnt/fsaai-shared/ebiser/fraud-data
@@ -152,6 +153,25 @@ COMPLETE: 768 files | 100.45 GB | 1.67 GB/s avg
 
 GPU-accelerated feature engineering using RAPIDS cuDF with Dask for multi-GPU parallelism.
 
+**CPU vs GPU Comparison:**
+Pod 2 runs the same workload twice - first with CPU (pandas), then with GPU (cuDF) - to demonstrate that FlashBlade can saturate GPU processing speeds.
+
+**Example Output:**
+```
+======================================================================
+PERFORMANCE COMPARISON
+======================================================================
+  Records processed: 50,000,000
+
+  Stage                CPU (s)      GPU (s)      Speedup   
+  -------------------- ------------ ------------ ----------
+  Data Loading         45.23        8.12         5.6x
+  Feature Engineering  32.67        2.34         14.0x
+  -------------------- ------------ ------------ ----------
+  TOTAL                77.90        10.46        7.4x
+======================================================================
+```
+
 **Features Added:**
 - Amount: `amt_log`, `amt_scaled`
 - Time: `hour_of_day`, `day_of_week`, `is_weekend`, `is_night`
@@ -203,7 +223,7 @@ Tested on: 2x NVIDIA L40S, Pure Storage FlashBlade
 | Stage | Performance |
 |-------|-------------|
 | Data Generation | 2.0-2.5 GB/s sustained |
-| Feature Engineering (50M rows) | ~140 seconds |
+| Feature Engineering (50M rows) | ~140 seconds (CPU) / ~10 seconds (GPU) |
 | Model Training (40M rows) | ~17 seconds |
 | Inference Latency | <1ms per transaction |
 
@@ -219,7 +239,7 @@ FB_DATA=/mnt/fsaai-shared/ebiser/fraud-data
 FB_PREP=/mnt/fsaai-shared/ebiser/prep-output
 
 # Model output
-MODEL_REPO=./model_repository
+FA_MODEL_REPO=./model_repository
 
 # Pod 1: Data generation
 NUM_WORKERS=128

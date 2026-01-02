@@ -1,4 +1,4 @@
-# Financial Fraud Detection Pipeline
+# Fraud Detection Demo
 # Demonstrates Pure Storage FlashBlade/FlashArray with NVIDIA GPU acceleration
 #
 # All paths are configured in .env file (single source of truth)
@@ -42,6 +42,7 @@ services:
   # ============================================================================
   # Pod 2: Feature Engineering (Multi-GPU)
   # RAPIDS cuDF/Dask for GPU-accelerated data preparation
+  # Runs CPU first, then GPU, to demonstrate acceleration
   # Input:  ${FB_DATA}/run_*/worker_*.parquet (from Pod 1)
   # Output: ${FB_PREP}/features_run_*.parquet
   # ============================================================================
@@ -75,7 +76,7 @@ services:
   # Pod 3: Model Training (GPU)
   # XGBoost with GPU acceleration for fraud classification
   # Input:  ${FB_PREP}/features_*.parquet (from Pod 2)
-  # Output: ${MODEL_REPO}/fraud_xgboost/ (Triton model repository)
+  # Output: ${FA_MODEL_REPO}/fraud_xgboost/ (Triton model repository)
   # ============================================================================
   model-build:
     build: ./pods/model-build
@@ -84,7 +85,7 @@ services:
       # Read prepared features from Pod 2
       - ${FB_PREP}:/data/input:ro
       # Write model directly to Triton model repository
-      - ${MODEL_REPO}:/data/models
+      - ${FA_MODEL_REPO}:/data/models
     environment:
       - PREP_OUTPUT_DIR=/data/input
       - FA_MOUNT=/data/models
@@ -103,18 +104,18 @@ services:
   # ============================================================================
   # Pod 4: Inference Server (GPU)
   # NVIDIA Triton with FIL backend for real-time fraud detection
-  # Input:  ${MODEL_REPO}/fraud_xgboost/ (from Pod 3)
+  # Input:  ${FA_MODEL_REPO}/fraud_xgboost/ (from Pod 3)
   # ============================================================================
   inference:
     image: nvcr.io/nvidia/tritonserver:24.02-py3
-    container_name: frosty-hypatia
+    container_name: fraud-inference
     ports:
       - "8000:8000"   # HTTP
       - "8001:8001"   # gRPC
       - "8002:8002"   # Metrics
     volumes:
       # Mount model repository - must match Pod 3 output location
-      - ${MODEL_REPO}:/models:ro
+      - ${FA_MODEL_REPO}:/models:ro
     command: ["tritonserver", "--model-repository=/models", "--strict-model-config=false", "--log-verbose=1"]
     deploy:
       resources:
