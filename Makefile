@@ -29,7 +29,9 @@ help:
 	@echo "  make build       Build all containers"
 	@echo "  make pipeline    Run full pipeline (pods 1-3)"
 	@echo "  make inference   Start inference server (pod 4)"
-	@echo "  make test        Test inference endpoint"
+	@echo "  make test        Test both CPU and GPU models"
+	@echo "  make test-cpu    Test CPU model only"
+	@echo "  make test-gpu    Test GPU model only"
 	@echo "  make stop        Stop all containers"
 	@echo "  make clean-data  Remove generated data"
 	@echo "  make clean-all   Full cleanup (data + images)"
@@ -38,7 +40,7 @@ help:
 	@echo "Individual pods:"
 	@echo "  make pod1        Run data generator"
 	@echo "  make pod2        Run feature engineering (CPU vs GPU comparison)"
-	@echo "  make pod3        Run model training"
+	@echo "  make pod3        Run model training (CPU vs GPU comparison)"
 	@echo ""
 	@echo "Configuration (from .env):"
 	@echo "  FB_DATA=$(FB_DATA)"
@@ -60,11 +62,9 @@ env-check:
 	@echo "  FA_MODEL_REPO: $(FA_MODEL_REPO)"
 	@test -d $(FA_MODEL_REPO) && echo "    ✓ exists" || echo "    ✗ MISSING - will be created during pipeline"
 	@echo ""
-	@echo "Data flow:"
-	@echo "  Pod 1 → $(FB_DATA)/run_*/*.parquet"
-	@echo "  Pod 2 → $(FB_PREP)/features_*.parquet"
-	@echo "  Pod 3 → $(FA_MODEL_REPO)/fraud_xgboost/"
-	@echo "  Pod 4 ← $(FA_MODEL_REPO)/fraud_xgboost/"
+	@echo "Expected models after training:"
+	@echo "  $(FA_MODEL_REPO)/fraud_xgboost_cpu/  (CPU inference)"
+	@echo "  $(FA_MODEL_REPO)/fraud_xgboost_gpu/  (GPU inference)"
 
 build:
 	@echo "Building all containers..."
@@ -88,15 +88,16 @@ pipeline: build
 	@echo "[2/3] Feature Engineering (CPU vs GPU comparison)..."
 	docker compose run --rm data-prep
 	@echo ""
-	@echo "[3/3] Model Training..."
+	@echo "[3/3] Model Training (CPU vs GPU comparison)..."
 	docker compose run --rm model-build
 	@echo ""
 	@echo "=========================================="
 	@echo "Pipeline Complete!"
 	@echo "=========================================="
 	@echo ""
-	@echo "Verify model output:"
-	@ls -la $(FA_MODEL_REPO)/fraud_xgboost/ 2>/dev/null || echo "  Warning: Model not found at $(FA_MODEL_REPO)/fraud_xgboost/"
+	@echo "Models created:"
+	@ls -la $(FA_MODEL_REPO)/fraud_xgboost_cpu/ 2>/dev/null || echo "  Warning: CPU model not found"
+	@ls -la $(FA_MODEL_REPO)/fraud_xgboost_gpu/ 2>/dev/null || echo "  Warning: GPU model not found"
 	@echo ""
 	@echo "Start inference: make inference"
 
@@ -117,12 +118,14 @@ pod3:
 inference:
 	@echo "Starting Triton Inference Server..."
 	@echo "Model repository: $(FA_MODEL_REPO)"
-	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ]; then \
-		echo "ERROR: Model not found at $(FA_MODEL_REPO)/fraud_xgboost/"; \
-		echo "Run 'make pipeline' first to train the model."; \
+	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ]; then \
+		echo "ERROR: No models found at $(FA_MODEL_REPO)/"; \
+		echo "Run 'make pipeline' first to train models."; \
 		exit 1; \
 	fi
-	@ls -la $(FA_MODEL_REPO)/fraud_xgboost/
+	@echo ""
+	@echo "Available models:"
+	@ls -d $(FA_MODEL_REPO)/fraud_xgboost_*/ 2>/dev/null | xargs -I{} basename {}
 	docker compose up -d inference
 	@echo ""
 	@echo "Waiting for server to be ready..."
@@ -133,15 +136,54 @@ inference:
 	@echo "  HTTP:    http://localhost:8000"
 	@echo "  gRPC:    localhost:8001"
 	@echo "  Metrics: http://localhost:8002"
+	@echo ""
+	@echo "Models:"
+	@echo "  CPU: http://localhost:8000/v2/models/fraud_xgboost_cpu"
+	@echo "  GPU: http://localhost:8000/v2/models/fraud_xgboost_gpu"
 
-# Test inference
+# Test both models
 test:
-	@echo "Testing inference endpoint..."
-	@curl -s -X POST http://localhost:8000/v2/models/fraud_xgboost/infer \
+	@echo "Testing both CPU and GPU models..."
+	@echo ""
+	@bash scripts/test_inference.sh
+
+# Test CPU model only
+test-cpu:
+	@echo "Testing CPU model (fraud_xgboost_cpu)..."
+	@echo ""
+	@curl -s -X POST http://localhost:8000/v2/models/fraud_xgboost_cpu/infer \
 		-H "Content-Type: application/json" \
 		-d '{"inputs": [{"name": "input__0", "shape": [1, 21], "datatype": "FP32", "data": [100.0, 35.0, -90.0, 50000, 1704067200, 35.1, -90.1, 12345, 30301, 4.6, 0.5, 12, 3, 0, 0, 10.5, 1, 10, 1, 10.8, 3]}]}' \
-		| python3 -m json.tool 2>/dev/null || echo "Error: Inference server not responding. Run 'make inference' first."
+		| python3 -m json.tool 2>/dev/null || echo "Error: CPU model not responding"
 	@echo ""
+
+# Test GPU model only
+test-gpu:
+	@echo "Testing GPU model (fraud_xgboost_gpu)..."
+	@echo ""
+	@curl -s -X POST http://localhost:8000/v2/models/fraud_xgboost_gpu/infer \
+		-H "Content-Type: application/json" \
+		-d '{"inputs": [{"name": "input__0", "shape": [1, 21], "datatype": "FP32", "data": [100.0, 35.0, -90.0, 50000, 1704067200, 35.1, -90.1, 12345, 30301, 4.6, 0.5, 12, 3, 0, 0, 10.5, 1, 10, 1, 10.8, 3]}]}' \
+		| python3 -m json.tool 2>/dev/null || echo "Error: GPU model not responding"
+	@echo ""
+
+# Compare inference latency between CPU and GPU
+test-latency:
+	@echo "Comparing inference latency..."
+	@echo ""
+	@echo "CPU Model (10 requests):"
+	@for i in $$(seq 1 10); do \
+		time curl -s -X POST http://localhost:8000/v2/models/fraud_xgboost_cpu/infer \
+			-H "Content-Type: application/json" \
+			-d '{"inputs": [{"name": "input__0", "shape": [1, 21], "datatype": "FP32", "data": [100.0, 35.0, -90.0, 50000, 1704067200, 35.1, -90.1, 12345, 30301, 4.6, 0.5, 12, 3, 0, 0, 10.5, 1, 10, 1, 10.8, 3]}]}' > /dev/null 2>&1; \
+	done
+	@echo ""
+	@echo "GPU Model (10 requests):"
+	@for i in $$(seq 1 10); do \
+		time curl -s -X POST http://localhost:8000/v2/models/fraud_xgboost_gpu/infer \
+			-H "Content-Type: application/json" \
+			-d '{"inputs": [{"name": "input__0", "shape": [1, 21], "datatype": "FP32", "data": [100.0, 35.0, -90.0, 50000, 1704067200, 35.1, -90.1, 12345, 30301, 4.6, 0.5, 12, 3, 0, 0, 10.5, 1, 10, 1, 10.8, 3]}]}' > /dev/null 2>&1; \
+	done
 
 # Check inference server status
 status:
@@ -150,6 +192,9 @@ status:
 	@echo ""
 	@echo "=== Model Repository ==="
 	@ls -la $(FA_MODEL_REPO)/ 2>/dev/null || echo "  No models found"
+	@echo ""
+	@echo "=== Available Models ==="
+	@curl -s http://localhost:8000/v2/models | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f'  {m[\"name\"]}') for m in d.get('models',[])]" 2>/dev/null || echo "  Triton not running"
 	@echo ""
 	@echo "=== Triton Health ==="
 	@curl -s http://localhost:8000/v2/health/ready && echo "Ready" || echo "Not ready"
