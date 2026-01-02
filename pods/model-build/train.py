@@ -167,6 +167,51 @@ class ModelTrainer:
         
         return model
     
+    def _export_feature_importance(self, model, feature_names, model_dir):
+        """Export feature importance analysis."""
+        log.info("Analyzing feature importance...")
+        
+        importance_types = ['weight', 'gain', 'cover']
+        importance_data = {}
+        
+        for imp_type in importance_types:
+            try:
+                scores = model.get_score(importance_type=imp_type)
+                # Map f0, f1, ... back to feature names
+                named_scores = {}
+                for feat_key, score in scores.items():
+                    idx = int(feat_key.replace('f', ''))
+                    if idx < len(feature_names):
+                        named_scores[feature_names[idx]] = score
+                importance_data[imp_type] = named_scores
+            except Exception as e:
+                log.warning(f"Could not get {imp_type} importance: {e}")
+        
+        # Save full importance data
+        importance_file = model_dir / "feature_importance.json"
+        with open(importance_file, 'w') as f:
+            json.dump(importance_data, f, indent=2)
+        log.info(f"Feature importance saved: {importance_file}")
+        
+        # Log top features by gain (most useful metric)
+        if 'gain' in importance_data:
+            sorted_features = sorted(
+                importance_data['gain'].items(), 
+                key=lambda x: x[1], 
+                reverse=True
+            )
+            log.info("")
+            log.info("Top 10 Features by Gain:")
+            log.info("-" * 40)
+            for i, (feat, score) in enumerate(sorted_features[:10], 1):
+                log.info(f"  {i:2d}. {feat:<20s} {score:,.2f}")
+            log.info("-" * 40)
+            
+            # Also check if distance_km is in there
+            if 'distance_km' in importance_data['gain']:
+                rank = [f for f, _ in sorted_features].index('distance_km') + 1
+                log.info(f"  distance_km rank: #{rank} of {len(sorted_features)}")
+    
     def save_model(self, model, feature_names):
         """Save model for Triton inference."""
         model_dir = self.output_path / "fraud_xgboost"
@@ -179,6 +224,9 @@ class ModelTrainer:
         
         with open(model_dir / "feature_names.json", 'w') as f:
             json.dump(feature_names, f, indent=2)
+        
+        # Export feature importance
+        self._export_feature_importance(model, feature_names, model_dir)
         
         config = f'''name: "fraud_xgboost"
 backend: "fil"
