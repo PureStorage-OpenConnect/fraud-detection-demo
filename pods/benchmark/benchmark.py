@@ -133,8 +133,33 @@ class InferenceBenchmark:
         """Load XGBoost model for CPU inference."""
         log.info("Loading XGBoost model for CPU inference...")
         
-        model_file = self.model_path / "fraud_xgboost" / "1" / "xgboost.json"
-        feature_file = self.model_path / "fraud_xgboost" / "feature_names.json"
+        # Check for model in multiple possible locations
+        model_dirs = [
+            "fraud_xgboost_gpu",  # GPU-trained model (preferred)
+            "fraud_xgboost_cpu",  # CPU-trained model
+            "fraud_xgboost",      # Default name
+        ]
+        
+        model_file = None
+        feature_file = None
+        
+        for model_dir in model_dirs:
+            candidate = self.model_path / model_dir / "1" / "xgboost.json"
+            if candidate.exists():
+                model_file = candidate
+                feature_file = self.model_path / model_dir / "feature_names.json"
+                log.info(f"  Found model: {model_dir}")
+                break
+        
+        if model_file is None:
+            # Try alternate model filename
+            for model_dir in model_dirs:
+                candidate = self.model_path / model_dir / "1" / "model.json"
+                if candidate.exists():
+                    model_file = candidate
+                    feature_file = self.model_path / model_dir / "feature_names.json"
+                    log.info(f"  Found model: {model_dir}")
+                    break
         
         if not model_file.exists():
             log.error(f"Model not found: {model_file}")
@@ -300,7 +325,26 @@ class InferenceBenchmark:
         log.info("GPU INFERENCE (Triton Server)")
         log.info("=" * 70)
         
-        url = f"{self.triton_url}/v2/models/fraud_xgboost/infer"
+        # Try multiple model names
+        model_names = ["fraud_xgboost_gpu", "fraud_xgboost_cpu", "fraud_xgboost"]
+        model_name = None
+        
+        for name in model_names:
+            try:
+                resp = requests.get(f"{self.triton_url}/v2/models/{name}", timeout=5)
+                if resp.status_code == 200:
+                    model_name = name
+                    log.info(f"  Using Triton model: {model_name}")
+                    break
+            except:
+                continue
+        
+        if model_name is None:
+            log.error("  No fraud model found on Triton server")
+            log.error(f"  Tried: {model_names}")
+            return None, None
+        
+        url = f"{self.triton_url}/v2/models/{model_name}/infer"
         
         def infer_batch(batch: np.ndarray) -> np.ndarray:
             """Send batch to Triton and get predictions."""

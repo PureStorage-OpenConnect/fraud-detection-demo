@@ -126,12 +126,12 @@ pod6: benchmark
 inference:
 	@echo "Starting Triton Inference Server..."
 	@echo "Model repository: $(FA_MODEL_REPO)"
-	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ]; then \
-		echo "ERROR: Model not found at $(FA_MODEL_REPO)/fraud_xgboost/"; \
+	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
+		echo "ERROR: No model found at $(FA_MODEL_REPO)/"; \
 		echo "Run 'make pipeline' first to train the model."; \
 		exit 1; \
 	fi
-	@ls -la $(FA_MODEL_REPO)/fraud_xgboost/
+	@ls -d $(FA_MODEL_REPO)/fraud_xgboost* 2>/dev/null
 	docker compose up -d inference
 	@echo ""
 	@echo "Waiting for server to be ready..."
@@ -156,11 +156,13 @@ benchmark:
 		echo "Run 'make pod1' or 'make pipeline' first to generate data."; \
 		exit 1; \
 	fi
-	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ]; then \
-		echo "ERROR: Model not found at $(FA_MODEL_REPO)/fraud_xgboost/"; \
+	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
+		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
+		echo "Expected: fraud_xgboost, fraud_xgboost_gpu, or fraud_xgboost_cpu"; \
 		echo "Run 'make pod3' or 'make pipeline' first to train the model."; \
 		exit 1; \
 	fi
+	@ls -d $(FA_MODEL_REPO)/fraud_xgboost* 2>/dev/null | head -1 | xargs -I{} echo "  Found model: {}"
 	@echo "Starting Triton server if not running..."
 	@docker compose up -d inference
 	@echo "Waiting for Triton to be ready..."
