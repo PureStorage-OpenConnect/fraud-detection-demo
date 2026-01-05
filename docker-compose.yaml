@@ -5,6 +5,7 @@
 #
 # Usage:
 #   make pipeline    # Run full pipeline (pods 1-4)
+#   make benchmark   # Run CPU vs GPU inference benchmark
 #   make clean-data  # Remove generated data
 #   make clean-all   # Full cleanup
 
@@ -151,6 +152,32 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+
+  # ============================================================================
+  # Pod 6: Inference Benchmark
+  # Compares CPU (XGBoost direct) vs GPU (Triton) inference performance
+  # Input:  ${FB_DATA}/run_*/*.parquet (raw data from Pod 1)
+  #         ${FA_MODEL_REPO}/fraud_xgboost/ (model from Pod 3)
+  # Output: Console performance comparison
+  # ============================================================================
+  benchmark:
+    build: ./pods/benchmark
+    container_name: fraud-benchmark
+    volumes:
+      # Read raw data from Pod 1
+      - ${FB_DATA}:/data/input:ro
+      # Read model from Pod 3 output
+      - ${FA_MODEL_REPO}:/data/models:ro
+    environment:
+      - DATA_DIR=/data/input
+      - MODEL_DIR=/data/models
+      - TRITON_URL=http://inference:8000
+      - SAMPLE_SIZE=${BENCHMARK_SAMPLE_SIZE:-10000}
+    depends_on:
+      inference:
+        condition: service_healthy
+    networks:
+      - fraud-net
 
 networks:
   fraud-net:
