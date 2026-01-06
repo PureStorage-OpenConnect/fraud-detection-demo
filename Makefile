@@ -19,7 +19,15 @@ NUM_WORKERS ?= 128
 MAX_FILES_PER_RUN ?= 100
 CHUNK_SIZE ?= 1000000
 FRAUD_RATE ?= 0.005
-BENCHMARK_SAMPLE_SIZE ?= 10000
+
+# Benchmark settings - AGGRESSIVE DEFAULTS
+DURATION ?= 60
+FA_WORKERS ?= 64
+FA_FILE_SIZE_MB ?= 50
+FA_NUM_FILES ?= 200
+FA_MIXED ?= false
+TRITON_WORKERS ?= 8
+TRITON_BATCH ?= 1000
 
 .PHONY: help build pipeline clean-data clean-all test inference stop env-check benchmark
 
@@ -31,8 +39,6 @@ help:
 	@echo "  make pipeline    Run full pipeline (pods 1-3)"
 	@echo "  make inference   Start inference server (pod 4)"
 	@echo "  make benchmark   Run FlashArray + Triton benchmark (pod 6)"
-	@echo "  make benchmark-fa      FlashArray only"
-	@echo "  make benchmark-triton  Triton only"
 	@echo "  make test        Test inference endpoint"
 	@echo "  make stop        Stop all containers"
 	@echo "  make clean-data  Remove generated data"
@@ -43,12 +49,22 @@ help:
 	@echo "  make pod2        Feature engineering"
 	@echo "  make pod3        Model training"
 	@echo ""
-	@echo "Benchmark options:"
-	@echo "  DURATION=$(DURATION)s"
-	@echo "  FA_WORKERS=$(FA_WORKERS)  FA_COPIES=$(FA_COPIES)"
-	@echo "  TRITON_WORKERS=$(TRITON_WORKERS)  TRITON_BATCH=$(TRITON_BATCH)"
+	@echo "FlashArray Benchmark options:"
+	@echo "  make benchmark              Default (64 workers, 200x50MB files)"
+	@echo "  make benchmark-light        Light test (16 workers, 50x20MB files)"
+	@echo "  make benchmark-heavy        Heavy test (128 workers, 500x100MB files)"
+	@echo "  make benchmark-mixed        Mixed read/write workload"
+	@echo "  make benchmark-fa           FlashArray only (no Triton)"
+	@echo "  make benchmark-triton       Triton only (no FlashArray)"
 	@echo ""
-	@echo "Example: make benchmark DURATION=120 FA_WORKERS=128"
+	@echo "Custom benchmark:"
+	@echo "  make benchmark DURATION=120 FA_WORKERS=128 FA_NUM_FILES=500"
+	@echo ""
+	@echo "Current settings:"
+	@echo "  Duration:     $(DURATION)s"
+	@echo "  FA Workers:   $(FA_WORKERS)"
+	@echo "  FA Files:     $(FA_NUM_FILES) x $(FA_FILE_SIZE_MB)MB = $$(( $(FA_NUM_FILES) * $(FA_FILE_SIZE_MB) / 1024 ))GB"
+	@echo "  Triton:       $(TRITON_WORKERS) workers, batch=$(TRITON_BATCH)"
 
 # Verify environment and paths
 env-check:
@@ -69,7 +85,7 @@ env-check:
 	@echo "  Pod 2 → $(FB_PREP)/features_*.parquet"
 	@echo "  Pod 3 → $(FA_MODEL_REPO)/fraud_xgboost/"
 	@echo "  Pod 4 ← $(FA_MODEL_REPO)/fraud_xgboost/"
-	@echo "  Pod 6 ← $(FB_DATA)/run_*/*.parquet + $(FA_MODEL_REPO)/fraud_xgboost/"
+	@echo "  Pod 6 ← $(FA_MODEL_REPO) (creates test files here)"
 
 build:
 	@echo "Building all containers..."
@@ -101,11 +117,11 @@ pipeline: build
 	@echo "=========================================="
 	@echo ""
 	@echo "Verify model output:"
-	@ls -la $(FA_MODEL_REPO)/fraud_xgboost/ 2>/dev/null || echo "  Warning: Model not found at $(FA_MODEL_REPO)/fraud_xgboost/"
+	@ls -la $(FA_MODEL_REPO)/fraud_xgboost_gpu/ 2>/dev/null || ls -la $(FA_MODEL_REPO)/fraud_xgboost/ 2>/dev/null || echo "  Warning: Model not found"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  make inference   - Start Triton server"
-	@echo "  make benchmark   - Run CPU vs GPU inference benchmark"
+	@echo "  make benchmark   - Run FlashArray stress test"
 
 # Individual pods
 pod1:
@@ -143,47 +159,59 @@ inference:
 	@echo "  gRPC:    localhost:8001"
 	@echo "  Metrics: http://localhost:8002"
 
-# Benchmark settings
-DURATION ?= 60
-FA_WORKERS ?= 64
-FA_COPIES ?= 100
-TRITON_WORKERS ?= 8
-TRITON_BATCH ?= 1000
+# =============================================================================
+# FlashArray Benchmark Targets
+# =============================================================================
 
-# Run combined FlashArray + Triton benchmark (default)
+# Default benchmark - good starting point
 benchmark:
 	@echo ""
 	@echo "=========================================="
-	@echo "Combined Storage & Inference Benchmark"
+	@echo "FlashArray + Triton Benchmark"
 	@echo "=========================================="
-	@echo "Duration:       $(DURATION)s per test"
-	@echo "FlashArray:     $(FA_WORKERS) workers, $(FA_COPIES) model copies"
-	@echo "Triton:         $(TRITON_WORKERS) workers, $(TRITON_BATCH) batch size"
+	@echo "Settings:"
+	@echo "  Duration:     $(DURATION)s per test"
+	@echo "  FA Workers:   $(FA_WORKERS)"
+	@echo "  FA Files:     $(FA_NUM_FILES) x $(FA_FILE_SIZE_MB)MB"
+	@echo "  FA Total:     $$(( $(FA_NUM_FILES) * $(FA_FILE_SIZE_MB) / 1024 ))GB working set"
+	@echo "  Triton:       $(TRITON_WORKERS) workers, batch=$(TRITON_BATCH)"
 	@echo ""
-	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
-		echo "ERROR: Model not found. Run 'make pipeline' first."; \
-		exit 1; \
-	fi
-	@echo "Starting Triton server..."
-	@docker compose up -d inference
-	@echo "Waiting for Triton..."
-	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-		if curl -s http://localhost:8000/v2/health/ready > /dev/null 2>&1; then \
-			echo "  Triton ready!"; \
-			break; \
-		fi; \
-		sleep 3; \
-	done
-	@echo ""
-	DURATION=$(DURATION) FA_WORKERS=$(FA_WORKERS) FA_COPIES=$(FA_COPIES) \
+	docker compose build benchmark
+	DURATION=$(DURATION) FA_WORKERS=$(FA_WORKERS) FA_FILE_SIZE_MB=$(FA_FILE_SIZE_MB) \
+	FA_NUM_FILES=$(FA_NUM_FILES) FA_MIXED=$(FA_MIXED) \
 	TRITON_WORKERS=$(TRITON_WORKERS) TRITON_BATCH=$(TRITON_BATCH) \
 	RUN_FA=true RUN_TRITON=true \
+	docker compose run --rm benchmark
+
+# Light benchmark - quick test
+benchmark-light:
+	@echo "Light benchmark (16 workers, 50x20MB = 1GB)"
+	DURATION=$(DURATION) FA_WORKERS=16 FA_FILE_SIZE_MB=20 FA_NUM_FILES=50 \
+	RUN_FA=true RUN_TRITON=true \
+	docker compose run --rm benchmark
+
+# Heavy benchmark - stress test
+benchmark-heavy:
+	@echo "Heavy benchmark (128 workers, 500x100MB = 50GB)"
+	@echo "This will create ~50GB of test data!"
+	DURATION=$(DURATION) FA_WORKERS=128 FA_FILE_SIZE_MB=100 FA_NUM_FILES=500 \
+	RUN_FA=true RUN_TRITON=false \
+	docker compose run --rm benchmark
+
+# Mixed read/write workload (80/20)
+benchmark-mixed:
+	@echo "Mixed workload benchmark (80% read, 20% write)"
+	DURATION=$(DURATION) FA_WORKERS=$(FA_WORKERS) FA_FILE_SIZE_MB=$(FA_FILE_SIZE_MB) \
+	FA_NUM_FILES=$(FA_NUM_FILES) FA_MIXED=true \
+	RUN_FA=true RUN_TRITON=false \
 	docker compose run --rm benchmark
 
 # FlashArray only (no Triton)
 benchmark-fa:
 	@echo "FlashArray-only benchmark..."
-	DURATION=$(DURATION) FA_WORKERS=$(FA_WORKERS) FA_COPIES=$(FA_COPIES) \
+	docker compose build benchmark
+	DURATION=$(DURATION) FA_WORKERS=$(FA_WORKERS) FA_FILE_SIZE_MB=$(FA_FILE_SIZE_MB) \
+	FA_NUM_FILES=$(FA_NUM_FILES) FA_MIXED=$(FA_MIXED) \
 	RUN_FA=true RUN_TRITON=false \
 	docker compose run --rm benchmark
 
@@ -196,23 +224,30 @@ benchmark-triton:
 	RUN_FA=false RUN_TRITON=true \
 	docker compose run --rm benchmark
 
-# Aggressive FlashArray test (more workers, more copies)
-benchmark-io:
-	@echo "Aggressive FlashArray I/O test..."
-	DURATION=$(DURATION) FA_WORKERS=128 FA_COPIES=200 \
+# Maximum stress - all out
+benchmark-max:
+	@echo "MAXIMUM STRESS TEST"
+	@echo "256 workers, 1000x100MB files = 100GB working set"
+	@echo "Press Ctrl+C to cancel, Enter to continue..."
+	@read
+	DURATION=120 FA_WORKERS=256 FA_FILE_SIZE_MB=100 FA_NUM_FILES=1000 \
 	RUN_FA=true RUN_TRITON=false \
 	docker compose run --rm benchmark
 
 # Test inference
 test:
 	@echo "Testing inference endpoint..."
-	@curl -s -X POST http://localhost:8000/v2/models/fraud_xgboost/infer \
+	@curl -s -X POST http://localhost:8000/v2/models/fraud_xgboost_gpu/infer \
+		-H "Content-Type: application/json" \
+		-d '{"inputs": [{"name": "input__0", "shape": [1, 21], "datatype": "FP32", "data": [100.0, 35.0, -90.0, 50000, 1704067200, 35.1, -90.1, 12345, 30301, 4.6, 0.5, 12, 3, 0, 0, 10.5, 1, 10, 1, 10.8, 3]}]}' \
+		| python3 -m json.tool 2>/dev/null || \
+	curl -s -X POST http://localhost:8000/v2/models/fraud_xgboost/infer \
 		-H "Content-Type: application/json" \
 		-d '{"inputs": [{"name": "input__0", "shape": [1, 21], "datatype": "FP32", "data": [100.0, 35.0, -90.0, 50000, 1704067200, 35.1, -90.1, 12345, 30301, 4.6, 0.5, 12, 3, 0, 0, 10.5, 1, 10, 1, 10.8, 3]}]}' \
 		| python3 -m json.tool 2>/dev/null || echo "Error: Inference server not responding. Run 'make inference' first."
 	@echo ""
 
-# Check inference server status
+# Check status
 status:
 	@echo "=== Container Status ==="
 	@docker compose ps

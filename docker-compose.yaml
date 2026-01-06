@@ -5,7 +5,7 @@
 #
 # Usage:
 #   make pipeline    # Run full pipeline (pods 1-4)
-#   make benchmark   # Run CPU vs GPU inference benchmark
+#   make benchmark   # Run FlashArray + Triton benchmark
 #   make clean-data  # Remove generated data
 #   make clean-all   # Full cleanup
 
@@ -154,13 +154,14 @@ services:
       retries: 3
 
   # ============================================================================
-  # Pod 6: Combined Storage & Inference Benchmark
-  # Part 1: FlashArray model loading stress test
-  # Part 2: Triton inference throughput test
+  # Pod 6: FlashArray + Triton Benchmark
+  # Aggressive I/O stress test to demonstrate FlashArray performance
+  # Creates large unique files to defeat caching and show true storage I/O
   # ============================================================================
   benchmark:
     build: ./pods/benchmark
     container_name: fraud-benchmark
+    privileged: true  # Allows drop_caches for true storage benchmarking
     volumes:
       - ${FA_MODEL_REPO}:/data/models
       - ${FB_DATA}:/data/input:ro
@@ -168,11 +169,13 @@ services:
       - MODEL_DIR=/data/models
       - DATA_DIR=/data/input
       - DURATION_SECONDS=${DURATION:-60}
-      # FlashArray test
+      # FlashArray I/O stress test settings
       - RUN_FA=${RUN_FA:-true}
       - FA_WORKERS=${FA_WORKERS:-64}
-      - FA_COPIES=${FA_COPIES:-100}
-      # Triton test
+      - FA_FILE_SIZE_MB=${FA_FILE_SIZE_MB:-50}
+      - FA_NUM_FILES=${FA_NUM_FILES:-200}
+      - FA_MIXED=${FA_MIXED:-false}
+      # Triton inference test settings
       - RUN_TRITON=${RUN_TRITON:-true}
       - TRITON_URL=inference:8001
       - TRITON_WORKERS=${TRITON_WORKERS:-8}
