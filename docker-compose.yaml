@@ -166,7 +166,8 @@ services:
     container_name: fraud-benchmark
     volumes:
       # Model repository on FlashArray (stress test target)
-      - ${FA_MODEL_REPO}:/data/models:ro
+      # NOTE: Must be read-write for creating model copies
+      - ${FA_MODEL_REPO}:/data/models
       # Data from FlashBlade (for test inference)
       - ${FB_DATA}:/data/input:ro
     environment:
@@ -174,7 +175,8 @@ services:
       - DATA_DIR=/data/input
       - DURATION_SECONDS=${BENCHMARK_DURATION:-60}
       - NUM_WORKERS=${BENCHMARK_WORKERS:-8}
-      - RUN_INFERENCE=${BENCHMARK_INFERENCE:-true}
+      - NUM_MODEL_COPIES=${BENCHMARK_COPIES:-100}
+      - RUN_INFERENCE=${BENCHMARK_INFERENCE:-false}
       - INFERENCE_BATCH_SIZE=${BENCHMARK_BATCH_SIZE:-1000}
     networks:
       - fraud-net

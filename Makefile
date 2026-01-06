@@ -53,8 +53,9 @@ help:
 	@echo "Benchmark options (FlashArray stress test):"
 	@echo "  BENCHMARK_DURATION=$(BENCHMARK_DURATION)s"
 	@echo "  BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) (concurrent model loaders)"
+	@echo "  BENCHMARK_COPIES=$(BENCHMARK_COPIES) (defeats page cache)"
 	@echo "  BENCHMARK_INFERENCE=$(BENCHMARK_INFERENCE)"
-	@echo "  Example: make benchmark BENCHMARK_DURATION=120 BENCHMARK_WORKERS=32"
+	@echo "  Example: make benchmark BENCHMARK_DURATION=120 BENCHMARK_WORKERS=32 BENCHMARK_COPIES=200"
 
 # Verify environment and paths
 env-check:
@@ -152,7 +153,8 @@ inference:
 # Benchmark settings
 BENCHMARK_DURATION ?= 60
 BENCHMARK_WORKERS ?= 8
-BENCHMARK_INFERENCE ?= true
+BENCHMARK_COPIES ?= 100
+BENCHMARK_INFERENCE ?= false
 BENCHMARK_BATCH_SIZE ?= 1000
 
 # Run FlashArray model reload stress test
@@ -163,6 +165,7 @@ benchmark:
 	@echo "=========================================="
 	@echo "Duration:       $(BENCHMARK_DURATION)s per test"
 	@echo "Workers:        $(BENCHMARK_WORKERS) concurrent"
+	@echo "Model copies:   $(BENCHMARK_COPIES) (defeats page cache)"
 	@echo "Run inference:  $(BENCHMARK_INFERENCE)"
 	@echo ""
 	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
@@ -173,26 +176,26 @@ benchmark:
 	fi
 	@ls -d $(FA_MODEL_REPO)/fraud_xgboost* 2>/dev/null | head -1 | xargs -I{} echo "  Found model: {}"
 	@echo ""
-	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_INFERENCE=$(BENCHMARK_INFERENCE) BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm benchmark
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_COPIES=$(BENCHMARK_COPIES) BENCHMARK_INFERENCE=$(BENCHMARK_INFERENCE) BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm benchmark
 	@echo ""
 	@echo "Stress test complete!"
 	@echo "Check Grafana for FlashArray I/O metrics"
 
-# Run FlashArray stress test without inference (pure I/O)
+# Run FlashArray stress test with more copies (aggressive cache defeat)
 benchmark-io:
 	@echo ""
 	@echo "=========================================="
-	@echo "FlashArray Pure I/O Stress Test"
+	@echo "FlashArray Aggressive I/O Stress Test"
 	@echo "=========================================="
 	@echo "Duration:       $(BENCHMARK_DURATION)s per test"
 	@echo "Workers:        $(BENCHMARK_WORKERS) concurrent"
-	@echo "Run inference:  false (pure model load I/O)"
+	@echo "Model copies:   200 (aggressive cache defeat)"
 	@echo ""
 	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
 		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
 		exit 1; \
 	fi
-	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_INFERENCE=false docker compose run --rm benchmark
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_COPIES=200 BENCHMARK_INFERENCE=false docker compose run --rm benchmark
 
 # Test inference
 test:
