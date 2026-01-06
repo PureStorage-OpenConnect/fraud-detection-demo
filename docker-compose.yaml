@@ -154,38 +154,29 @@ services:
       retries: 3
 
   # ============================================================================
-  # Pod 6: Storage & Inference Stress Test
-  # Demonstrates Pure Storage FlashArray + NVIDIA Triton performance
-  # - FlashArray test: Model loading I/O (defeats page cache)
-  # - Triton test: Sustained inference throughput via gRPC
-  # Input:  ${FA_MODEL_REPO}/fraud_xgboost*/ (model from Pod 3)
-  #         ${FB_DATA}/run_*/*.parquet (test data from Pod 1)
-  # Output: Console performance metrics + Grafana dashboards
+  # Pod 6: Combined Storage & Inference Benchmark
+  # Part 1: FlashArray model loading stress test
+  # Part 2: Triton inference throughput test
   # ============================================================================
   benchmark:
     build: ./pods/benchmark
     container_name: fraud-benchmark
     volumes:
-      # Model repository on FlashArray (stress test target)
-      # NOTE: Must be read-write for creating model copies
       - ${FA_MODEL_REPO}:/data/models
-      # Data from FlashBlade (for test inference)
       - ${FB_DATA}:/data/input:ro
     environment:
-      # Common settings
       - MODEL_DIR=/data/models
       - DATA_DIR=/data/input
-      - DURATION_SECONDS=${BENCHMARK_DURATION:-60}
-      # FlashArray test settings
-      - RUN_FLASHARRAY=${RUN_FLASHARRAY:-true}
-      - NUM_WORKERS=${BENCHMARK_WORKERS:-8}
-      - NUM_MODEL_COPIES=${BENCHMARK_COPIES:-100}
-      - RUN_INFERENCE=false
-      # Triton test settings
-      - RUN_TRITON=${RUN_TRITON:-false}
-      - TRITON_GRPC_URL=inference:8001
+      - DURATION_SECONDS=${DURATION:-60}
+      # FlashArray test
+      - RUN_FA=${RUN_FA:-true}
+      - FA_WORKERS=${FA_WORKERS:-64}
+      - FA_COPIES=${FA_COPIES:-100}
+      # Triton test
+      - RUN_TRITON=${RUN_TRITON:-true}
+      - TRITON_URL=inference:8001
       - TRITON_WORKERS=${TRITON_WORKERS:-8}
-      - TRITON_BATCH_SIZE=${TRITON_BATCH_SIZE:-1000}
+      - TRITON_BATCH_SIZE=${TRITON_BATCH:-1000}
     networks:
       - fraud-net
 
