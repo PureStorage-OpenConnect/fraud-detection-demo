@@ -1,7 +1,5 @@
-# Pod 6: Inference Benchmark
+# Pod 6: FlashArray Model Reload Stress Test
 numpy>=1.26.0
 pandas>=2.1.0
 pyarrow>=14.0.0
 xgboost>=2.0.0
-requests>=2.31.0
-tritonclient[grpc]>=2.42.0

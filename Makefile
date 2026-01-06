@@ -30,7 +30,8 @@ help:
 	@echo "  make build       Build all containers"
 	@echo "  make pipeline    Run full pipeline (pods 1-3)"
 	@echo "  make inference   Start inference server (pod 4)"
-	@echo "  make benchmark   Run sustained throughput benchmark (pod 6)"
+	@echo "  make benchmark   Run FlashArray model reload stress test (pod 6)"
+	@echo "  make benchmark-io  Run pure I/O stress test (no inference)"
 	@echo "  make test        Test inference endpoint"
 	@echo "  make stop        Stop all containers"
 	@echo "  make clean-data  Remove generated data"
@@ -41,7 +42,7 @@ help:
 	@echo "  make pod1        Run data generator"
 	@echo "  make pod2        Run feature engineering (CPU vs GPU comparison)"
 	@echo "  make pod3        Run model training"
-	@echo "  make pod6        Run inference benchmark (requires pod1 data + pod3 model)"
+	@echo "  make pod6        Run FlashArray stress test"
 	@echo ""
 	@echo "Configuration (from .env):"
 	@echo "  FB_DATA=$(FB_DATA)"
@@ -49,11 +50,11 @@ help:
 	@echo "  FA_MODEL_REPO=$(FA_MODEL_REPO)"
 	@echo "  DURATION_SECONDS=$(DURATION_SECONDS)s NUM_WORKERS=$(NUM_WORKERS)"
 	@echo ""
-	@echo "Benchmark options:"
+	@echo "Benchmark options (FlashArray stress test):"
 	@echo "  BENCHMARK_DURATION=$(BENCHMARK_DURATION)s"
-	@echo "  BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE)"
-	@echo "  BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) (concurrent GPU workers)"
-	@echo "  Example: make benchmark BENCHMARK_DURATION=120 BENCHMARK_WORKERS=16"
+	@echo "  BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) (concurrent model loaders)"
+	@echo "  BENCHMARK_INFERENCE=$(BENCHMARK_INFERENCE)"
+	@echo "  Example: make benchmark BENCHMARK_DURATION=120 BENCHMARK_WORKERS=32"
 
 # Verify environment and paths
 env-check:
@@ -150,24 +151,20 @@ inference:
 
 # Benchmark settings
 BENCHMARK_DURATION ?= 60
-BENCHMARK_BATCH_SIZE ?= 10000
 BENCHMARK_WORKERS ?= 8
+BENCHMARK_INFERENCE ?= true
+BENCHMARK_BATCH_SIZE ?= 1000
 
-# Run sustained throughput benchmark (CPU vs GPU)
+# Run FlashArray model reload stress test
 benchmark:
 	@echo ""
 	@echo "=========================================="
-	@echo "Sustained Throughput Benchmark: CPU vs GPU"
+	@echo "FlashArray Model Reload Stress Test"
 	@echo "=========================================="
-	@echo "Duration:    $(BENCHMARK_DURATION)s per model"
-	@echo "Batch size:  $(BENCHMARK_BATCH_SIZE) records"
-	@echo "GPU workers: $(BENCHMARK_WORKERS) concurrent (gRPC)"
+	@echo "Duration:       $(BENCHMARK_DURATION)s per test"
+	@echo "Workers:        $(BENCHMARK_WORKERS) concurrent"
+	@echo "Run inference:  $(BENCHMARK_INFERENCE)"
 	@echo ""
-	@if [ ! -d "$(FB_DATA)" ] || [ -z "$$(ls -A $(FB_DATA)/run_* 2>/dev/null)" ]; then \
-		echo "ERROR: No data found at $(FB_DATA)/run_*/"; \
-		echo "Run 'make pod1' or 'make pipeline' first to generate data."; \
-		exit 1; \
-	fi
 	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
 		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
 		echo "Expected: fraud_xgboost, fraud_xgboost_gpu, or fraud_xgboost_cpu"; \
@@ -175,40 +172,27 @@ benchmark:
 		exit 1; \
 	fi
 	@ls -d $(FA_MODEL_REPO)/fraud_xgboost* 2>/dev/null | head -1 | xargs -I{} echo "  Found model: {}"
-	@echo "Starting Triton server if not running..."
-	@docker compose up -d inference
-	@echo "Waiting for Triton to be ready..."
-	@for i in 1 2 3 4 5 6 7 8 9 10; do \
-		if curl -s http://localhost:8000/v2/health/ready > /dev/null 2>&1; then \
-			echo "  Triton ready!"; \
-			break; \
-		fi; \
-		echo "  Waiting... ($$i/10)"; \
-		sleep 3; \
-	done
 	@echo ""
-	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) docker compose run --rm benchmark
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_INFERENCE=$(BENCHMARK_INFERENCE) BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm benchmark
 	@echo ""
-	@echo "Benchmark complete!"
+	@echo "Stress test complete!"
+	@echo "Check Grafana for FlashArray I/O metrics"
 
-# Run benchmark without Triton (CPU only)
-benchmark-cpu:
+# Run FlashArray stress test without inference (pure I/O)
+benchmark-io:
 	@echo ""
 	@echo "=========================================="
-	@echo "Sustained Throughput Benchmark: CPU Only"
+	@echo "FlashArray Pure I/O Stress Test"
 	@echo "=========================================="
-	@echo "Duration:   $(BENCHMARK_DURATION)s"
-	@echo "Batch size: $(BENCHMARK_BATCH_SIZE) records"
+	@echo "Duration:       $(BENCHMARK_DURATION)s per test"
+	@echo "Workers:        $(BENCHMARK_WORKERS) concurrent"
+	@echo "Run inference:  false (pure model load I/O)"
 	@echo ""
-	@if [ ! -d "$(FB_DATA)" ] || [ -z "$$(ls -A $(FB_DATA)/run_* 2>/dev/null)" ]; then \
-		echo "ERROR: No data found at $(FB_DATA)/run_*/"; \
-		exit 1; \
-	fi
 	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
 		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
 		exit 1; \
 	fi
-	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm -e TRITON_URL=http://localhost:9999 benchmark
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_INFERENCE=false docker compose run --rm benchmark
 
 # Test inference
 test:

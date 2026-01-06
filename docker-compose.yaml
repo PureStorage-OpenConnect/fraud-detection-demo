@@ -154,31 +154,28 @@ services:
       retries: 3
 
   # ============================================================================
-  # Pod 6: Inference Benchmark
-  # Sustained throughput test comparing CPU (XGBoost) vs GPU (Triton gRPC)
-  # Uses concurrent workers to demonstrate GPU parallelism advantage
-  # Input:  ${FB_DATA}/run_*/*.parquet (raw data from Pod 1)
-  #         ${FA_MODEL_REPO}/fraud_xgboost*/ (model from Pod 3)
-  # Output: Console performance comparison
+  # Pod 6: FlashArray Model Reload Stress Test
+  # Demonstrates low-latency model serving from Pure Storage FlashArray
+  # Continuously loads models to stress test storage I/O
+  # Input:  ${FA_MODEL_REPO}/fraud_xgboost*/ (model from Pod 3)
+  #         ${FB_DATA}/run_*/*.parquet (test data from Pod 1)
+  # Output: Console performance metrics
   # ============================================================================
   benchmark:
     build: ./pods/benchmark
     container_name: fraud-benchmark
     volumes:
-      # Read raw data from Pod 1
-      - ${FB_DATA}:/data/input:ro
-      # Read model from Pod 3 output
+      # Model repository on FlashArray (stress test target)
       - ${FA_MODEL_REPO}:/data/models:ro
+      # Data from FlashBlade (for test inference)
+      - ${FB_DATA}:/data/input:ro
     environment:
-      - DATA_DIR=/data/input
       - MODEL_DIR=/data/models
-      - TRITON_URL=http://inference:8000
+      - DATA_DIR=/data/input
       - DURATION_SECONDS=${BENCHMARK_DURATION:-60}
-      - BATCH_SIZE=${BENCHMARK_BATCH_SIZE:-10000}
       - NUM_WORKERS=${BENCHMARK_WORKERS:-8}
-    depends_on:
-      inference:
-        condition: service_healthy
+      - RUN_INFERENCE=${BENCHMARK_INFERENCE:-true}
+      - INFERENCE_BATCH_SIZE=${BENCHMARK_BATCH_SIZE:-1000}
     networks:
       - fraud-net
 
