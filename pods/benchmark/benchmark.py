@@ -96,7 +96,7 @@ class Metrics:
 # PART 1: FlashArray Stress Test
 # =============================================================================
 def run_flasharray_test(model_dir: str, duration: int, num_workers: int, num_copies: int):
-    """Stress test FlashArray with model loading - bypasses page cache."""
+    """Stress test FlashArray with model loading - bypasses page cache using dd."""
     log.info("")
     log.info("=" * 70)
     log.info("PART 1: FLASHARRAY MODEL LOADING STRESS TEST")
@@ -132,41 +132,40 @@ def run_flasharray_test(model_dir: str, duration: int, num_workers: int, num_cop
     log.info(f"Creating {num_copies} model copies...")
     model_content = model_file.read_bytes()
     
-    # Pad to 4KB alignment for O_DIRECT
-    block_size = 4096
-    padded_size = ((len(model_content) + block_size - 1) // block_size) * block_size
-    
     copies = []
     for i in range(num_copies):
         copy_path = temp_dir / f"model_{i:04d}.json"
-        # Add unique content and pad to block alignment
-        unique = f'\n{{"_copy_id": {i}, "_timestamp": {time.time_ns()}, "_random": "{os.urandom(16).hex()}"}}'
-        content = model_content + unique.encode()
-        # Pad to block alignment
-        padding = padded_size - len(content)
-        if padding > 0:
-            content = content + b' ' * padding
-        copy_path.write_bytes(content)
+        # Add unique content to defeat dedup
+        unique = f'\n{{"_copy_id": {i}, "_timestamp": {time.time_ns()}, "_random": "{os.urandom(32).hex()}"}}'
+        copy_path.write_bytes(model_content + unique.encode())
         copies.append(copy_path)
     
     actual_size = copies[0].stat().st_size
     log.info(f"Created {len(copies)} copies ({len(copies) * actual_size / (1024**2):.1f} MB)")
-    log.info(f"File size: {actual_size} bytes (4KB aligned for O_DIRECT)")
     
-    # Check if O_DIRECT is available
-    try:
-        import os as _os
-        O_DIRECT = getattr(_os, 'O_DIRECT', 0o40000)  # Linux value
-        test_fd = _os.open(str(copies[0]), _os.O_RDONLY | O_DIRECT)
-        _os.close(test_fd)
-        use_direct = True
-        log.info("Using O_DIRECT to bypass page cache")
-    except:
-        use_direct = False
-        log.info("O_DIRECT not available, using posix_fadvise")
+    # Test if dd with direct works
+    import subprocess
+    test_result = subprocess.run(
+        ['dd', f'if={copies[0]}', 'of=/dev/null', 'bs=1M', 'iflag=direct', 'count=1'],
+        capture_output=True, text=True
+    )
+    use_direct = test_result.returncode == 0
+    if use_direct:
+        log.info("Using dd iflag=direct to bypass page cache")
+    else:
+        log.info(f"Direct I/O failed: {test_result.stderr.strip()}")
+        log.info("Falling back to standard reads with large working set")
+        # Create more copies to exceed cache
+        if len(copies) < 500:
+            log.info(f"Creating additional copies to exceed cache...")
+            for i in range(len(copies), 500):
+                copy_path = temp_dir / f"model_{i:04d}.json"
+                unique = f'\n{{"_copy_id": {i}, "_timestamp": {time.time_ns()}, "_random": "{os.urandom(32).hex()}"}}'
+                copy_path.write_bytes(model_content + unique.encode())
+                copies.append(copy_path)
+            log.info(f"Now have {len(copies)} copies ({len(copies) * actual_size / (1024**2):.1f} MB)")
     
     try:
-        # Multi-threaded test
         log.info(f"Running {duration}s stress test with {num_workers} workers...")
         log.info("")
         
@@ -174,15 +173,7 @@ def run_flasharray_test(model_dir: str, duration: int, num_workers: int, num_cop
         stop_event = threading.Event()
         
         def worker(worker_id):
-            idx = worker_id * 7  # Spread out starting points
-            O_DIRECT = getattr(os, 'O_DIRECT', 0o40000)
-            
-            # Aligned buffer for O_DIRECT
-            if use_direct:
-                import ctypes
-                buf_size = padded_size
-                # Create aligned buffer
-                buf = ctypes.create_string_buffer(buf_size)
+            idx = worker_id * 7  # Spread starting points
             
             while not stop_event.is_set():
                 filepath = copies[idx % len(copies)]
@@ -191,34 +182,29 @@ def run_flasharray_test(model_dir: str, duration: int, num_workers: int, num_cop
                     start = time.time()
                     
                     if use_direct:
-                        # O_DIRECT read - bypasses page cache
-                        fd = os.open(str(filepath), os.O_RDONLY | O_DIRECT)
-                        try:
-                            data = os.read(fd, padded_size)
-                        finally:
-                            os.close(fd)
+                        # Use dd with direct flag - bypasses page cache
+                        result = subprocess.run(
+                            ['dd', f'if={filepath}', 'of=/dev/null', 'bs=1M', 'iflag=direct'],
+                            capture_output=True, text=True
+                        )
+                        if result.returncode != 0:
+                            continue
+                        bytes_read = actual_size
                     else:
-                        # Regular read with fadvise
-                        fd = os.open(str(filepath), os.O_RDONLY)
-                        try:
-                            data = os.read(fd, actual_size)
-                            # Tell kernel to drop this from cache
-                            try:
-                                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
-                            except:
-                                pass
-                        finally:
-                            os.close(fd)
+                        # Standard read
+                        with open(filepath, 'rb') as f:
+                            data = f.read()
+                        bytes_read = len(data)
                     
-                    # Load into XGBoost (validates the data)
+                    # Also load into XGBoost to validate
                     model = xgb.Booster()
                     model.load_model(str(filepath))
                     
                     elapsed_ms = (time.time() - start) * 1000
-                    metrics.add(elapsed_ms, len(data))
+                    metrics.add(elapsed_ms, bytes_read)
                     del model
                 except Exception as e:
-                    pass
+                    log.warning(f"Worker {worker_id} error: {e}")
         
         # Start workers
         workers = []
@@ -253,7 +239,7 @@ def run_flasharray_test(model_dir: str, duration: int, num_workers: int, num_cop
         log.info(f"  ✓ {metrics.throughput_mb:.1f} MB/s sustained throughput")
         log.info(f"  ✓ {metrics.avg_ms:.1f}ms avg latency, {metrics.p95_ms:.1f}ms P95")
         if use_direct:
-            log.info(f"  ✓ O_DIRECT bypassed page cache - this is REAL storage I/O")
+            log.info(f"  ✓ Direct I/O bypassed page cache")
         
     finally:
         # Cleanup

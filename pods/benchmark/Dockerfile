@@ -4,6 +4,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install coreutils for dd with direct I/O support
+RUN apt-get update && apt-get install -y --no-install-recommends coreutils && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir \
     numpy>=1.26.0 \
     pandas>=2.1.0 \
@@ -21,7 +24,7 @@ ENV DURATION_SECONDS=60
 # FlashArray test
 ENV RUN_FA=true
 ENV FA_WORKERS=64
-ENV FA_COPIES=100
+ENV FA_COPIES=500
 
 # Triton test
 ENV RUN_TRITON=true
