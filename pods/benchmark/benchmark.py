@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
-Pod 6: Inference Benchmark
-Compares CPU (XGBoost direct) vs GPU (Triton) inference performance.
-Loads raw data from Pod 1, applies feature engineering, runs inference.
+Pod 6: Sustained Throughput Benchmark
+Measures sustained inference throughput over 60 seconds for CPU vs GPU.
+Continuously loads data from FlashBlade to simulate real-world workloads.
 """
 
 import os
 import sys
 import time
 import json
+import threading
 import requests
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple, Optional
+from typing import List, Dict, Optional, Iterator
+from dataclasses import dataclass, field
+from queue import Queue, Empty
+import random
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import xgboost as xgb
 
 logging.basicConfig(
@@ -44,6 +49,41 @@ US_STATES = [
     'IA', 'NV', 'AR', 'MS', 'KS', 'NM', 'NE', 'ID', 'WV', 'HI',
     'NH', 'ME', 'MT', 'RI', 'DE', 'SD', 'ND', 'AK', 'VT', 'WY'
 ]
+
+
+@dataclass
+class BenchmarkMetrics:
+    """Tracks benchmark metrics."""
+    records_processed: int = 0
+    batches_processed: int = 0
+    bytes_read: int = 0
+    inference_time_ms: float = 0.0
+    load_time_ms: float = 0.0
+    feature_time_ms: float = 0.0
+    fraud_detected: int = 0
+    start_time: float = field(default_factory=time.time)
+    
+    @property
+    def elapsed_seconds(self) -> float:
+        return time.time() - self.start_time
+    
+    @property
+    def throughput_records_sec(self) -> float:
+        if self.elapsed_seconds > 0:
+            return self.records_processed / self.elapsed_seconds
+        return 0.0
+    
+    @property
+    def throughput_mb_sec(self) -> float:
+        if self.elapsed_seconds > 0:
+            return (self.bytes_read / (1024**2)) / self.elapsed_seconds
+        return 0.0
+    
+    @property
+    def avg_latency_ms(self) -> float:
+        if self.batches_processed > 0:
+            return self.inference_time_ms / self.batches_processed
+        return 0.0
 
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -100,344 +140,355 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-class InferenceBenchmark:
-    """Benchmark CPU vs GPU inference performance."""
+class DataLoader:
+    """Loads batches from FlashBlade parquet files."""
+    
+    def __init__(self, data_dir: Path, batch_size: int = 10000):
+        self.data_dir = data_dir
+        self.batch_size = batch_size
+        self.files: List[Path] = []
+        self._discover_files()
+    
+    def _discover_files(self):
+        """Find all parquet files from most recent run."""
+        run_dirs = sorted([
+            d for d in self.data_dir.iterdir()
+            if d.is_dir() and d.name.startswith("run_")
+        ])
+        
+        if not run_dirs:
+            raise FileNotFoundError(f"No run directories in {self.data_dir}")
+        
+        run_dir = run_dirs[-1]
+        self.files = sorted(run_dir.glob("worker_*.parquet"))
+        
+        if not self.files:
+            raise FileNotFoundError(f"No parquet files in {run_dir}")
+        
+        log.info(f"  Data source: {run_dir.name}")
+        log.info(f"  Files available: {len(self.files)}")
+    
+    def iterate_batches(self, duration_seconds: float) -> Iterator[tuple]:
+        """
+        Yield (dataframe, bytes_read) batches for specified duration.
+        Cycles through files continuously.
+        """
+        start = time.time()
+        file_idx = 0
+        
+        while (time.time() - start) < duration_seconds:
+            filepath = self.files[file_idx % len(self.files)]
+            file_idx += 1
+            
+            try:
+                # Read file and get size
+                file_size = filepath.stat().st_size
+                df = pd.read_parquet(filepath)
+                
+                # Yield in batches
+                for i in range(0, len(df), self.batch_size):
+                    if (time.time() - start) >= duration_seconds:
+                        return
+                    
+                    batch = df.iloc[i:i+self.batch_size].copy()
+                    batch_bytes = int(file_size * len(batch) / len(df))
+                    yield batch, batch_bytes
+                    
+            except Exception as e:
+                log.warning(f"Error reading {filepath.name}: {e}")
+                continue
+
+
+class SustainedBenchmark:
+    """Runs sustained throughput benchmark for CPU and GPU inference."""
     
     def __init__(
         self,
         data_dir: str,
         model_dir: str,
         triton_url: str,
-        sample_size: int = 10000
+        duration_seconds: int = 60,
+        batch_size: int = 10000
     ):
         self.data_path = Path(data_dir)
         self.model_path = Path(model_dir)
         self.triton_url = triton_url.rstrip('/')
-        self.sample_size = sample_size
+        self.duration = duration_seconds
+        self.batch_size = batch_size
         
         self.model: Optional[xgb.Booster] = None
         self.feature_names: List[str] = []
-        self.data: Optional[pd.DataFrame] = None
-        self.features: Optional[np.ndarray] = None
+        self.triton_model_name: Optional[str] = None
         
         log.info("=" * 70)
-        log.info("Pod 6: Inference Benchmark - CPU vs GPU Comparison")
+        log.info("Pod 6: Sustained Throughput Benchmark")
         log.info("=" * 70)
-        log.info(f"Data source: {self.data_path}")
-        log.info(f"Model repo:  {self.model_path}")
-        log.info(f"Triton URL:  {self.triton_url}")
-        log.info(f"Sample size: {self.sample_size:,}")
+        log.info(f"Data source:    {self.data_path}")
+        log.info(f"Model repo:     {self.model_path}")
+        log.info(f"Triton URL:     {self.triton_url}")
+        log.info(f"Duration:       {self.duration}s per model")
+        log.info(f"Batch size:     {self.batch_size:,} records")
         log.info("=" * 70)
     
     def load_model(self) -> bool:
         """Load XGBoost model for CPU inference."""
-        log.info("Loading XGBoost model for CPU inference...")
+        log.info("Loading XGBoost model...")
         
         # Check for model in multiple possible locations
-        model_dirs = [
-            "fraud_xgboost_gpu",  # GPU-trained model (preferred)
-            "fraud_xgboost_cpu",  # CPU-trained model
-            "fraud_xgboost",      # Default name
-        ]
+        model_dirs = ["fraud_xgboost_gpu", "fraud_xgboost_cpu", "fraud_xgboost"]
         
         model_file = None
         feature_file = None
         
         for model_dir in model_dirs:
-            candidate = self.model_path / model_dir / "1" / "xgboost.json"
-            if candidate.exists():
-                model_file = candidate
-                feature_file = self.model_path / model_dir / "feature_names.json"
-                log.info(f"  Found model: {model_dir}")
-                break
-        
-        if model_file is None:
-            # Try alternate model filename
-            for model_dir in model_dirs:
-                candidate = self.model_path / model_dir / "1" / "model.json"
+            for model_name in ["xgboost.json", "model.json"]:
+                candidate = self.model_path / model_dir / "1" / model_name
                 if candidate.exists():
                     model_file = candidate
                     feature_file = self.model_path / model_dir / "feature_names.json"
-                    log.info(f"  Found model: {model_dir}")
+                    log.info(f"  Found: {model_dir}/{model_name}")
                     break
+            if model_file:
+                break
         
-        if not model_file.exists():
-            log.error(f"Model not found: {model_file}")
+        if model_file is None:
+            log.error("No XGBoost model found")
             return False
         
         self.model = xgb.Booster()
         self.model.load_model(str(model_file))
-        log.info(f"  Loaded model: {model_file.name}")
         
-        if feature_file.exists():
+        if feature_file and feature_file.exists():
             with open(feature_file) as f:
                 self.feature_names = json.load(f)
-            log.info(f"  Features: {len(self.feature_names)} columns")
-        else:
-            log.warning("  Feature names file not found, will use default order")
+            log.info(f"  Features: {len(self.feature_names)}")
         
         return True
     
     def check_triton(self) -> bool:
-        """Check if Triton server is ready."""
-        log.info("Checking Triton server availability...")
+        """Check Triton and find model name."""
+        log.info("Checking Triton server...")
         
         try:
             resp = requests.get(f"{self.triton_url}/v2/health/ready", timeout=5)
-            if resp.status_code == 200:
-                log.info("  Triton server is ready")
-                return True
-            else:
-                log.error(f"  Triton not ready: HTTP {resp.status_code}")
+            if resp.status_code != 200:
+                log.warning("  Triton not ready")
                 return False
-        except requests.exceptions.RequestException as e:
-            log.error(f"  Cannot connect to Triton: {e}")
-            return False
-    
-    def load_sample_data(self) -> bool:
-        """Load random sample from Pod 1 output."""
-        log.info(f"Loading {self.sample_size:,} random records...")
-        
-        # Find most recent run directory
-        if not self.data_path.exists():
-            log.error(f"Data path not found: {self.data_path}")
+        except Exception as e:
+            log.warning(f"  Cannot connect: {e}")
             return False
         
-        run_dirs = sorted([
-            d for d in self.data_path.iterdir()
-            if d.is_dir() and d.name.startswith("run_")
-        ])
-        
-        if not run_dirs:
-            log.error("No run directories found")
-            return False
-        
-        run_dir = run_dirs[-1]
-        log.info(f"  Using run: {run_dir.name}")
-        
-        # Get parquet files
-        parquet_files = sorted(run_dir.glob("worker_*.parquet"))
-        if not parquet_files:
-            log.error("No parquet files found in run directory")
-            return False
-        
-        log.info(f"  Found {len(parquet_files)} parquet files")
-        
-        # Sample from multiple files to get diversity
-        samples_per_file = max(1, self.sample_size // min(len(parquet_files), 10))
-        files_to_read = min(len(parquet_files), 10)
-        
-        parts = []
-        for f in parquet_files[:files_to_read]:
-            try:
-                df = pd.read_parquet(f)
-                if len(df) > samples_per_file:
-                    df = df.sample(n=samples_per_file, random_state=42)
-                parts.append(df)
-            except Exception as e:
-                log.warning(f"  Error reading {f.name}: {e}")
-                continue
-        
-        if not parts:
-            log.error("Failed to load any data")
-            return False
-        
-        self.data = pd.concat(parts, ignore_index=True)
-        
-        # Ensure exact sample size
-        if len(self.data) > self.sample_size:
-            self.data = self.data.sample(n=self.sample_size, random_state=42)
-        
-        log.info(f"  Loaded {len(self.data):,} records")
-        
-        # Store ground truth
-        self.ground_truth = self.data['is_fraud'].values.copy() if 'is_fraud' in self.data.columns else None
-        
-        return True
-    
-    def prepare_features(self) -> Tuple[float, float]:
-        """Apply feature engineering. Returns (eng_time, total_records)."""
-        log.info("Applying feature engineering...")
-        
-        start = time.time()
-        self.data = engineer_features(self.data)
-        eng_time = time.time() - start
-        
-        # Get features in correct order
-        if self.feature_names:
-            available = [c for c in self.feature_names if c in self.data.columns]
-            missing = [c for c in self.feature_names if c not in self.data.columns]
-            if missing:
-                log.warning(f"  Missing features (using zeros): {missing}")
-                for col in missing:
-                    self.data[col] = 0.0
-            self.features = self.data[self.feature_names].fillna(0).values.astype(np.float32)
-        else:
-            # Use all numeric columns
-            numeric_cols = self.data.select_dtypes(include=[np.number]).columns
-            exclude = ['is_fraud', 'cc_num', 'transaction_id']
-            cols = [c for c in numeric_cols if c not in exclude]
-            self.features = self.data[cols].fillna(0).values.astype(np.float32)
-        
-        log.info(f"  Engineered {len(self.data):,} records in {eng_time:.3f}s")
-        log.info(f"  Feature matrix shape: {self.features.shape}")
-        
-        return eng_time
-    
-    def run_cpu_inference(self, iterations: int = 5) -> Tuple[float, np.ndarray]:
-        """Run inference on CPU using XGBoost directly."""
-        log.info("")
-        log.info("=" * 70)
-        log.info("CPU INFERENCE (XGBoost Direct)")
-        log.info("=" * 70)
-        
-        dmatrix = xgb.DMatrix(self.features)
-        
-        # Warmup
-        log.info("  Warmup run...")
-        _ = self.model.predict(dmatrix)
-        
-        # Timed runs
-        times = []
-        predictions = None
-        
-        log.info(f"  Running {iterations} timed iterations...")
-        for i in range(iterations):
-            start = time.time()
-            predictions = self.model.predict(dmatrix)
-            elapsed = time.time() - start
-            times.append(elapsed)
-            log.info(f"    Iteration {i+1}: {elapsed*1000:.2f}ms")
-        
-        avg_time = np.mean(times)
-        std_time = np.std(times)
-        throughput = len(self.features) / avg_time
-        
-        log.info(f"  Average: {avg_time*1000:.2f}ms (±{std_time*1000:.2f}ms)")
-        log.info(f"  Throughput: {throughput:,.0f} records/sec")
-        
-        return avg_time, predictions
-    
-    def run_gpu_inference(self, iterations: int = 5, batch_size: int = 1000) -> Tuple[float, np.ndarray]:
-        """Run inference on GPU via Triton HTTP API."""
-        log.info("")
-        log.info("=" * 70)
-        log.info("GPU INFERENCE (Triton Server)")
-        log.info("=" * 70)
-        
-        # Try multiple model names
-        model_names = ["fraud_xgboost_gpu", "fraud_xgboost_cpu", "fraud_xgboost"]
-        model_name = None
-        
-        for name in model_names:
+        # Find model
+        for name in ["fraud_xgboost_gpu", "fraud_xgboost_cpu", "fraud_xgboost"]:
             try:
                 resp = requests.get(f"{self.triton_url}/v2/models/{name}", timeout=5)
                 if resp.status_code == 200:
-                    model_name = name
-                    log.info(f"  Using Triton model: {model_name}")
-                    break
+                    self.triton_model_name = name
+                    log.info(f"  Triton model: {name}")
+                    return True
             except:
                 continue
         
-        if model_name is None:
-            log.error("  No fraud model found on Triton server")
-            log.error(f"  Tried: {model_names}")
-            return None, None
-        
-        url = f"{self.triton_url}/v2/models/{model_name}/infer"
-        
-        def infer_batch(batch: np.ndarray) -> np.ndarray:
-            """Send batch to Triton and get predictions."""
-            payload = {
-                "inputs": [{
-                    "name": "input__0",
-                    "shape": list(batch.shape),
-                    "datatype": "FP32",
-                    "data": batch.flatten().tolist()
-                }]
-            }
-            resp = requests.post(url, json=payload, timeout=30)
-            resp.raise_for_status()
-            result = resp.json()
-            return np.array(result["outputs"][0]["data"])
-        
-        # Warmup
-        log.info("  Warmup run...")
-        _ = infer_batch(self.features[:batch_size])
-        
-        # Timed runs
-        times = []
-        all_predictions = []
-        
-        log.info(f"  Running {iterations} timed iterations (batch_size={batch_size})...")
-        
-        for i in range(iterations):
-            start = time.time()
-            preds = []
-            
-            # Process in batches
-            for j in range(0, len(self.features), batch_size):
-                batch = self.features[j:j+batch_size]
-                batch_preds = infer_batch(batch)
-                preds.extend(batch_preds)
-            
-            elapsed = time.time() - start
-            times.append(elapsed)
-            log.info(f"    Iteration {i+1}: {elapsed*1000:.2f}ms")
-            
-            if i == iterations - 1:
-                all_predictions = np.array(preds)
-        
-        avg_time = np.mean(times)
-        std_time = np.std(times)
-        throughput = len(self.features) / avg_time
-        
-        log.info(f"  Average: {avg_time*1000:.2f}ms (±{std_time*1000:.2f}ms)")
-        log.info(f"  Throughput: {throughput:,.0f} records/sec")
-        
-        return avg_time, all_predictions
+        log.warning("  No fraud model found on Triton")
+        return False
     
-    def compare_predictions(self, cpu_preds: np.ndarray, gpu_preds: np.ndarray):
-        """Compare CPU vs GPU predictions for consistency."""
-        log.info("")
-        log.info("-" * 70)
-        log.info("PREDICTION CONSISTENCY CHECK")
-        log.info("-" * 70)
+    def prepare_features(self, df: pd.DataFrame) -> np.ndarray:
+        """Apply feature engineering and return feature matrix."""
+        df = engineer_features(df)
         
-        # Ensure same length
-        min_len = min(len(cpu_preds), len(gpu_preds))
-        cpu_preds = cpu_preds[:min_len]
-        gpu_preds = gpu_preds[:min_len]
-        
-        # Compare
-        diff = np.abs(cpu_preds - gpu_preds)
-        max_diff = diff.max()
-        mean_diff = diff.mean()
-        
-        log.info(f"  Max difference:  {max_diff:.6f}")
-        log.info(f"  Mean difference: {mean_diff:.6f}")
-        
-        # Binary predictions
-        cpu_binary = (cpu_preds > 0.5).astype(int)
-        gpu_binary = (gpu_preds > 0.5).astype(int)
-        agreement = (cpu_binary == gpu_binary).mean() * 100
-        
-        log.info(f"  Binary agreement: {agreement:.2f}%")
-        
-        if max_diff < 0.0001:
-            log.info("  ✓ Predictions match within tolerance")
+        if self.feature_names:
+            # Ensure all required columns exist
+            for col in self.feature_names:
+                if col not in df.columns:
+                    df[col] = 0.0
+            features = df[self.feature_names].fillna(0).values.astype(np.float32)
         else:
-            log.warning("  ⚠ Predictions differ - check model versions")
+            # Use all numeric columns
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            exclude = ['is_fraud', 'cc_num', 'transaction_id']
+            cols = [c for c in numeric_cols if c not in exclude]
+            features = df[cols].fillna(0).values.astype(np.float32)
         
-        # Fraud detection stats
-        fraud_detected_cpu = cpu_binary.sum()
-        fraud_detected_gpu = gpu_binary.sum()
-        log.info(f"  Fraud detected (CPU): {fraud_detected_cpu} ({fraud_detected_cpu/len(cpu_binary)*100:.2f}%)")
-        log.info(f"  Fraud detected (GPU): {fraud_detected_gpu} ({fraud_detected_gpu/len(gpu_binary)*100:.2f}%)")
+        return features
+    
+    def run_cpu_benchmark(self) -> BenchmarkMetrics:
+        """Run sustained CPU inference benchmark."""
+        log.info("")
+        log.info("=" * 70)
+        log.info(f"CPU INFERENCE BENCHMARK ({self.duration}s)")
+        log.info("=" * 70)
         
-        if self.ground_truth is not None:
-            actual_fraud = self.ground_truth[:min_len].sum()
-            log.info(f"  Actual fraud:        {actual_fraud} ({actual_fraud/min_len*100:.2f}%)")
+        metrics = BenchmarkMetrics()
+        data_loader = DataLoader(self.data_path, self.batch_size)
+        
+        last_report = time.time()
+        report_interval = 5.0
+        
+        log.info(f"  {'Time':<8} {'Records':>12} {'Throughput':>15} {'Latency':>12} {'Read MB/s':>12}")
+        log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*12}")
+        
+        for batch_df, batch_bytes in data_loader.iterate_batches(self.duration):
+            # Load and feature engineering
+            load_start = time.time()
+            features = self.prepare_features(batch_df)
+            metrics.feature_time_ms += (time.time() - load_start) * 1000
+            
+            # Inference
+            infer_start = time.time()
+            dmatrix = xgb.DMatrix(features)
+            predictions = self.model.predict(dmatrix)
+            metrics.inference_time_ms += (time.time() - infer_start) * 1000
+            
+            # Update metrics
+            metrics.records_processed += len(features)
+            metrics.batches_processed += 1
+            metrics.bytes_read += batch_bytes
+            metrics.fraud_detected += int((predictions > 0.5).sum())
+            
+            # Progress report
+            if time.time() - last_report >= report_interval:
+                log.info(f"  {metrics.elapsed_seconds:>6.1f}s "
+                        f"{metrics.records_processed:>12,} "
+                        f"{metrics.throughput_records_sec:>12,.0f}/s "
+                        f"{metrics.avg_latency_ms:>10.2f}ms "
+                        f"{metrics.throughput_mb_sec:>10.1f}")
+                last_report = time.time()
+        
+        # Final report
+        log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*12}")
+        log.info(f"  {'TOTAL':<8} {metrics.records_processed:>12,} "
+                f"{metrics.throughput_records_sec:>12,.0f}/s "
+                f"{metrics.avg_latency_ms:>10.2f}ms "
+                f"{metrics.throughput_mb_sec:>10.1f}")
+        
+        return metrics
+    
+    def run_gpu_benchmark(self) -> Optional[BenchmarkMetrics]:
+        """Run sustained GPU inference benchmark via Triton."""
+        if not self.triton_model_name:
+            log.warning("Skipping GPU benchmark - Triton not available")
+            return None
+        
+        log.info("")
+        log.info("=" * 70)
+        log.info(f"GPU INFERENCE BENCHMARK ({self.duration}s)")
+        log.info("=" * 70)
+        
+        metrics = BenchmarkMetrics()
+        data_loader = DataLoader(self.data_path, self.batch_size)
+        
+        url = f"{self.triton_url}/v2/models/{self.triton_model_name}/infer"
+        session = requests.Session()
+        
+        last_report = time.time()
+        report_interval = 5.0
+        
+        log.info(f"  {'Time':<8} {'Records':>12} {'Throughput':>15} {'Latency':>12} {'Read MB/s':>12}")
+        log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*12}")
+        
+        for batch_df, batch_bytes in data_loader.iterate_batches(self.duration):
+            # Load and feature engineering
+            load_start = time.time()
+            features = self.prepare_features(batch_df)
+            metrics.feature_time_ms += (time.time() - load_start) * 1000
+            
+            # Inference via Triton
+            infer_start = time.time()
+            try:
+                payload = {
+                    "inputs": [{
+                        "name": "input__0",
+                        "shape": list(features.shape),
+                        "datatype": "FP32",
+                        "data": features.flatten().tolist()
+                    }]
+                }
+                resp = session.post(url, json=payload, timeout=30)
+                resp.raise_for_status()
+                result = resp.json()
+                predictions = np.array(result["outputs"][0]["data"])
+                
+            except Exception as e:
+                log.error(f"Triton error: {e}")
+                continue
+            
+            metrics.inference_time_ms += (time.time() - infer_start) * 1000
+            
+            # Update metrics
+            metrics.records_processed += len(features)
+            metrics.batches_processed += 1
+            metrics.bytes_read += batch_bytes
+            metrics.fraud_detected += int((predictions > 0.5).sum())
+            
+            # Progress report
+            if time.time() - last_report >= report_interval:
+                log.info(f"  {metrics.elapsed_seconds:>6.1f}s "
+                        f"{metrics.records_processed:>12,} "
+                        f"{metrics.throughput_records_sec:>12,.0f}/s "
+                        f"{metrics.avg_latency_ms:>10.2f}ms "
+                        f"{metrics.throughput_mb_sec:>10.1f}")
+                last_report = time.time()
+        
+        # Final report
+        log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*12}")
+        log.info(f"  {'TOTAL':<8} {metrics.records_processed:>12,} "
+                f"{metrics.throughput_records_sec:>12,.0f}/s "
+                f"{metrics.avg_latency_ms:>10.2f}ms "
+                f"{metrics.throughput_mb_sec:>10.1f}")
+        
+        return metrics
+    
+    def print_comparison(self, cpu_metrics: BenchmarkMetrics, gpu_metrics: Optional[BenchmarkMetrics]):
+        """Print final comparison summary."""
+        log.info("")
+        log.info("=" * 70)
+        log.info("SUSTAINED THROUGHPUT COMPARISON")
+        log.info("=" * 70)
+        log.info(f"  Test Duration: {self.duration}s per model")
+        log.info(f"  Batch Size:    {self.batch_size:,} records")
+        log.info("")
+        log.info(f"  {'Metric':<25} {'CPU (XGBoost)':<20} {'GPU (Triton)':<20}")
+        log.info(f"  {'-'*25} {'-'*20} {'-'*20}")
+        
+        cpu_tput = f"{cpu_metrics.throughput_records_sec:,.0f}/s"
+        cpu_lat = f"{cpu_metrics.avg_latency_ms:.2f}ms"
+        cpu_read = f"{cpu_metrics.throughput_mb_sec:.1f} MB/s"
+        cpu_records = f"{cpu_metrics.records_processed:,}"
+        cpu_fraud = f"{cpu_metrics.fraud_detected:,}"
+        
+        if gpu_metrics:
+            gpu_tput = f"{gpu_metrics.throughput_records_sec:,.0f}/s"
+            gpu_lat = f"{gpu_metrics.avg_latency_ms:.2f}ms"
+            gpu_read = f"{gpu_metrics.throughput_mb_sec:.1f} MB/s"
+            gpu_records = f"{gpu_metrics.records_processed:,}"
+            gpu_fraud = f"{gpu_metrics.fraud_detected:,}"
+        else:
+            gpu_tput = gpu_lat = gpu_read = gpu_records = gpu_fraud = "N/A"
+        
+        log.info(f"  {'Records Processed':<25} {cpu_records:<20} {gpu_records:<20}")
+        log.info(f"  {'Throughput':<25} {cpu_tput:<20} {gpu_tput:<20}")
+        log.info(f"  {'Avg Batch Latency':<25} {cpu_lat:<20} {gpu_lat:<20}")
+        log.info(f"  {'Data Read Rate':<25} {cpu_read:<20} {gpu_read:<20}")
+        log.info(f"  {'Fraud Detected':<25} {cpu_fraud:<20} {gpu_fraud:<20}")
+        
+        if gpu_metrics and gpu_metrics.throughput_records_sec > 0:
+            speedup = cpu_metrics.throughput_records_sec / gpu_metrics.throughput_records_sec
+            if speedup > 1:
+                log.info(f"  {'-'*25} {'-'*20} {'-'*20}")
+                log.info(f"  {'Result':<25} {'CPU is ' + f'{speedup:.1f}x faster':<20} {'':<20}")
+            else:
+                speedup = 1 / speedup
+                log.info(f"  {'-'*25} {'-'*20} {'-'*20}")
+                log.info(f"  {'Result':<25} {'':<20} {'GPU is ' + f'{speedup:.1f}x faster':<20}")
+        
+        log.info("=" * 70)
+        log.info("")
+        log.info("NOTES:")
+        log.info("  - CPU inference uses XGBoost directly (no network overhead)")
+        log.info("  - GPU inference uses Triton HTTP API (includes serialization)")
+        log.info("  - For production, use Triton gRPC or shared memory for better GPU perf")
+        log.info("  - Data read rate shows FlashBlade sustained throughput")
+        log.info("=" * 70)
     
     def run(self):
         """Execute full benchmark."""
@@ -447,67 +498,18 @@ class InferenceBenchmark:
             return
         
         # Check Triton
-        triton_available = self.check_triton()
+        triton_ok = self.check_triton()
         
-        # Load data
-        if not self.load_sample_data():
-            log.error("Failed to load sample data")
-            return
+        # Run CPU benchmark
+        cpu_metrics = self.run_cpu_benchmark()
         
-        # Feature engineering
-        eng_time = self.prepare_features()
+        # Run GPU benchmark
+        gpu_metrics = None
+        if triton_ok:
+            gpu_metrics = self.run_gpu_benchmark()
         
-        # CPU inference
-        cpu_time, cpu_preds = self.run_cpu_inference()
-        
-        # GPU inference (if Triton available)
-        gpu_time = None
-        gpu_preds = None
-        if triton_available:
-            try:
-                gpu_time, gpu_preds = self.run_gpu_inference()
-            except Exception as e:
-                log.error(f"GPU inference failed: {e}")
-                triton_available = False
-        
-        # Results comparison
-        log.info("")
-        log.info("=" * 70)
-        log.info("PERFORMANCE COMPARISON")
-        log.info("=" * 70)
-        log.info(f"  Records:             {len(self.features):,}")
-        log.info(f"  Features:            {self.features.shape[1]}")
-        log.info(f"  Feature Engineering: {eng_time*1000:.2f}ms")
-        log.info("")
-        log.info(f"  {'Method':<20} {'Time (ms)':<15} {'Throughput':<20} {'Speedup':<10}")
-        log.info(f"  {'-'*20} {'-'*15} {'-'*20} {'-'*10}")
-        
-        cpu_throughput = len(self.features) / cpu_time
-        log.info(f"  {'CPU (XGBoost)':<20} {cpu_time*1000:<15.2f} {cpu_throughput:>15,.0f}/s {'1.0x':<10}")
-        
-        if gpu_time:
-            gpu_throughput = len(self.features) / gpu_time
-            speedup = cpu_time / gpu_time
-            log.info(f"  {'GPU (Triton)':<20} {gpu_time*1000:<15.2f} {gpu_throughput:>15,.0f}/s {speedup:<10.1f}x")
-            
-            # Prediction consistency
-            if gpu_preds is not None:
-                self.compare_predictions(cpu_preds, gpu_preds)
-        else:
-            log.info(f"  {'GPU (Triton)':<20} {'N/A':<15} {'Server unavailable':<20}")
-        
-        log.info("=" * 70)
-        log.info("")
-        
-        # Summary
-        log.info("SUMMARY")
-        log.info("-" * 70)
-        if gpu_time and gpu_time < cpu_time:
-            log.info(f"  GPU inference is {cpu_time/gpu_time:.1f}x faster than CPU")
-        elif gpu_time:
-            log.info(f"  CPU inference is {gpu_time/cpu_time:.1f}x faster than GPU (batch overhead)")
-        log.info(f"  Total benchmark time: {eng_time + cpu_time + (gpu_time or 0):.2f}s")
-        log.info("=" * 70)
+        # Print comparison
+        self.print_comparison(cpu_metrics, gpu_metrics)
 
 
 def main():
@@ -515,13 +517,15 @@ def main():
     data_dir = os.getenv('DATA_DIR', '/data/input')
     model_dir = os.getenv('MODEL_DIR', '/data/models')
     triton_url = os.getenv('TRITON_URL', 'http://inference:8000')
-    sample_size = int(os.getenv('SAMPLE_SIZE', '10000'))
+    duration = int(os.getenv('DURATION_SECONDS', '60'))
+    batch_size = int(os.getenv('BATCH_SIZE', '10000'))
     
-    benchmark = InferenceBenchmark(
+    benchmark = SustainedBenchmark(
         data_dir=data_dir,
         model_dir=model_dir,
         triton_url=triton_url,
-        sample_size=sample_size
+        duration_seconds=duration,
+        batch_size=batch_size
     )
     benchmark.run()
 

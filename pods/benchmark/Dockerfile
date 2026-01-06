@@ -1,5 +1,5 @@
-# Pod 6: Inference Benchmark
-# Compares CPU (XGBoost) vs GPU (Triton) inference performance
+# Pod 6: Sustained Throughput Benchmark
+# Compares CPU (XGBoost) vs GPU (Triton) inference over 60 seconds
 
 FROM python:3.11-slim
 
@@ -19,7 +19,8 @@ COPY benchmark.py .
 ENV DATA_DIR=/data/input
 ENV MODEL_DIR=/data/models
 ENV TRITON_URL=http://inference:8000
-ENV SAMPLE_SIZE=10000
+ENV DURATION_SECONDS=60
+ENV BATCH_SIZE=10000
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "benchmark.py"]

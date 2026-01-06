@@ -155,9 +155,9 @@ services:
 
   # ============================================================================
   # Pod 6: Inference Benchmark
-  # Compares CPU (XGBoost direct) vs GPU (Triton) inference performance
+  # Sustained throughput test comparing CPU (XGBoost) vs GPU (Triton)
   # Input:  ${FB_DATA}/run_*/*.parquet (raw data from Pod 1)
-  #         ${FA_MODEL_REPO}/fraud_xgboost/ (model from Pod 3)
+  #         ${FA_MODEL_REPO}/fraud_xgboost*/ (model from Pod 3)
   # Output: Console performance comparison
   # ============================================================================
   benchmark:
@@ -172,7 +172,8 @@ services:
       - DATA_DIR=/data/input
       - MODEL_DIR=/data/models
       - TRITON_URL=http://inference:8000
-      - SAMPLE_SIZE=${BENCHMARK_SAMPLE_SIZE:-10000}
+      - DURATION_SECONDS=${DURATION_SECONDS:-60}
+      - BATCH_SIZE=${BATCH_SIZE:-10000}
     depends_on:
       inference:
         condition: service_healthy

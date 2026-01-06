@@ -30,7 +30,7 @@ help:
 	@echo "  make build       Build all containers"
 	@echo "  make pipeline    Run full pipeline (pods 1-3)"
 	@echo "  make inference   Start inference server (pod 4)"
-	@echo "  make benchmark   Run CPU vs GPU inference benchmark (pod 6)"
+	@echo "  make benchmark   Run sustained throughput benchmark (pod 6)"
 	@echo "  make test        Test inference endpoint"
 	@echo "  make stop        Stop all containers"
 	@echo "  make clean-data  Remove generated data"
@@ -48,7 +48,11 @@ help:
 	@echo "  FB_PREP=$(FB_PREP)"
 	@echo "  FA_MODEL_REPO=$(FA_MODEL_REPO)"
 	@echo "  DURATION_SECONDS=$(DURATION_SECONDS)s NUM_WORKERS=$(NUM_WORKERS)"
-	@echo "  BENCHMARK_SAMPLE_SIZE=$(BENCHMARK_SAMPLE_SIZE)"
+	@echo ""
+	@echo "Benchmark options:"
+	@echo "  BENCHMARK_DURATION=$(BENCHMARK_DURATION)s"
+	@echo "  BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE)"
+	@echo "  Example: make benchmark BENCHMARK_DURATION=120 BENCHMARK_BATCH_SIZE=50000"
 
 # Verify environment and paths
 env-check:
@@ -143,13 +147,18 @@ inference:
 	@echo "  gRPC:    localhost:8001"
 	@echo "  Metrics: http://localhost:8002"
 
-# Run inference benchmark (CPU vs GPU comparison)
+# Benchmark settings
+BENCHMARK_DURATION ?= 60
+BENCHMARK_BATCH_SIZE ?= 10000
+
+# Run sustained throughput benchmark (CPU vs GPU)
 benchmark:
 	@echo ""
 	@echo "=========================================="
-	@echo "Inference Benchmark: CPU vs GPU"
+	@echo "Sustained Throughput Benchmark: CPU vs GPU"
 	@echo "=========================================="
-	@echo "Sample size: $(BENCHMARK_SAMPLE_SIZE) records"
+	@echo "Duration:   $(BENCHMARK_DURATION)s per model"
+	@echo "Batch size: $(BENCHMARK_BATCH_SIZE) records"
 	@echo ""
 	@if [ ! -d "$(FB_DATA)" ] || [ -z "$$(ls -A $(FB_DATA)/run_* 2>/dev/null)" ]; then \
 		echo "ERROR: No data found at $(FB_DATA)/run_*/"; \
@@ -175,7 +184,7 @@ benchmark:
 		sleep 3; \
 	done
 	@echo ""
-	docker compose run --rm benchmark
+	DURATION_SECONDS=$(BENCHMARK_DURATION) BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm benchmark
 	@echo ""
 	@echo "Benchmark complete!"
 
@@ -183,17 +192,20 @@ benchmark:
 benchmark-cpu:
 	@echo ""
 	@echo "=========================================="
-	@echo "Inference Benchmark: CPU Only"
+	@echo "Sustained Throughput Benchmark: CPU Only"
 	@echo "=========================================="
+	@echo "Duration:   $(BENCHMARK_DURATION)s"
+	@echo "Batch size: $(BENCHMARK_BATCH_SIZE) records"
+	@echo ""
 	@if [ ! -d "$(FB_DATA)" ] || [ -z "$$(ls -A $(FB_DATA)/run_* 2>/dev/null)" ]; then \
 		echo "ERROR: No data found at $(FB_DATA)/run_*/"; \
 		exit 1; \
 	fi
-	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ]; then \
-		echo "ERROR: Model not found at $(FA_MODEL_REPO)/fraud_xgboost/"; \
+	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
+		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
 		exit 1; \
 	fi
-	docker compose run --rm -e TRITON_URL=http://localhost:9999 benchmark
+	DURATION_SECONDS=$(BENCHMARK_DURATION) BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm -e TRITON_URL=http://localhost:9999 benchmark
 
 # Test inference
 test:
