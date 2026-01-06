@@ -2,16 +2,17 @@
 """
 Pod 6: Sustained Throughput Benchmark
 Measures sustained inference throughput over 60 seconds for CPU vs GPU.
-Continuously loads data from FlashBlade to simulate real-world workloads.
+
+GPU benchmark uses gRPC with concurrent workers to demonstrate true GPU throughput.
 """
 
 import os
 import sys
 import time
 import json
-import threading
-import requests
 import logging
+import threading
+import concurrent.futures
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Optional, Iterator
@@ -23,6 +24,15 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 import xgboost as xgb
+
+# Try to import tritonclient for gRPC (faster than HTTP)
+try:
+    import tritonclient.grpc as grpcclient
+    GRPC_AVAILABLE = True
+except ImportError:
+    GRPC_AVAILABLE = False
+
+import requests
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,15 +63,23 @@ US_STATES = [
 
 @dataclass
 class BenchmarkMetrics:
-    """Tracks benchmark metrics."""
+    """Tracks benchmark metrics with thread safety."""
     records_processed: int = 0
     batches_processed: int = 0
     bytes_read: int = 0
     inference_time_ms: float = 0.0
-    load_time_ms: float = 0.0
-    feature_time_ms: float = 0.0
     fraud_detected: int = 0
     start_time: float = field(default_factory=time.time)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+    
+    def add(self, records: int, batches: int, bytes_read: int, 
+            inference_ms: float, fraud: int):
+        with self._lock:
+            self.records_processed += records
+            self.batches_processed += batches
+            self.bytes_read += bytes_read
+            self.inference_time_ms += inference_ms
+            self.fraud_detected += fraud
     
     @property
     def elapsed_seconds(self) -> float:
@@ -69,14 +87,16 @@ class BenchmarkMetrics:
     
     @property
     def throughput_records_sec(self) -> float:
-        if self.elapsed_seconds > 0:
-            return self.records_processed / self.elapsed_seconds
+        elapsed = self.elapsed_seconds
+        if elapsed > 0:
+            return self.records_processed / elapsed
         return 0.0
     
     @property
     def throughput_mb_sec(self) -> float:
-        if self.elapsed_seconds > 0:
-            return (self.bytes_read / (1024**2)) / self.elapsed_seconds
+        elapsed = self.elapsed_seconds
+        if elapsed > 0:
+            return (self.bytes_read / (1024**2)) / elapsed
         return 0.0
     
     @property
@@ -90,16 +110,11 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """Apply feature engineering (matches Pod 2 CPU path)."""
     df = df.copy()
     
-    # Amount features
     if 'amt' in df.columns:
         df['amt_log'] = np.log1p(df['amt'].values)
         mean, std = df['amt'].mean(), df['amt'].std()
-        if std > 0.001:
-            df['amt_scaled'] = (df['amt'] - mean) / std
-        else:
-            df['amt_scaled'] = 0.0
+        df['amt_scaled'] = (df['amt'] - mean) / std if std > 0.001 else 0.0
     
-    # Time features
     if 'unix_time' in df.columns:
         hours = (df['unix_time'] / 3600) % 24
         df['hour_of_day'] = hours
@@ -107,13 +122,11 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         df['is_weekend'] = (df['day_of_week'] >= 5).astype('int8')
         df['is_night'] = ((hours >= 22) | (hours <= 6)).astype('int8')
     
-    # Distance between customer and merchant
     if all(c in df.columns for c in ['lat', 'long', 'merch_lat', 'merch_long']):
         dlat = (df['merch_lat'] - df['lat']) * 111.0
         dlon = (df['merch_long'] - df['long']) * 85.0
         df['distance_km'] = np.sqrt(dlat**2 + dlon**2)
     
-    # Categorical encoding
     if 'category' in df.columns:
         cat_map = {c: i for i, c in enumerate(CATEGORIES)}
         df['category_encoded'] = df['category'].map(cat_map).fillna(-1).astype('int8')
@@ -125,14 +138,12 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     if 'gender' in df.columns:
         df['gender_encoded'] = (df['gender'] == 'M').astype('int8')
     
-    # Population features
     if 'city_pop' in df.columns:
         df['city_pop_log'] = np.log1p(df['city_pop'].values)
     
     if 'zip' in df.columns:
         df['zip_region'] = (df['zip'] / 10000).astype('int8')
     
-    # Drop string columns
     cols_to_drop = [c for c in STRING_COLUMNS_TO_DROP if c in df.columns]
     if cols_to_drop:
         df = df.drop(columns=cols_to_drop)
@@ -169,10 +180,7 @@ class DataLoader:
         log.info(f"  Files available: {len(self.files)}")
     
     def iterate_batches(self, duration_seconds: float) -> Iterator[tuple]:
-        """
-        Yield (dataframe, bytes_read) batches for specified duration.
-        Cycles through files continuously.
-        """
+        """Yield (dataframe, bytes_read) batches for specified duration."""
         start = time.time()
         file_idx = 0
         
@@ -181,11 +189,9 @@ class DataLoader:
             file_idx += 1
             
             try:
-                # Read file and get size
                 file_size = filepath.stat().st_size
                 df = pd.read_parquet(filepath)
                 
-                # Yield in batches
                 for i in range(0, len(df), self.batch_size):
                     if (time.time() - start) >= duration_seconds:
                         return
@@ -208,13 +214,17 @@ class SustainedBenchmark:
         model_dir: str,
         triton_url: str,
         duration_seconds: int = 60,
-        batch_size: int = 10000
+        batch_size: int = 10000,
+        num_workers: int = 8
     ):
         self.data_path = Path(data_dir)
         self.model_path = Path(model_dir)
-        self.triton_url = triton_url.rstrip('/')
+        self.triton_http_url = triton_url.rstrip('/')
+        # Extract host for gRPC (default port 8001)
+        self.triton_grpc_url = triton_url.replace('http://', '').replace(':8000', ':8001')
         self.duration = duration_seconds
         self.batch_size = batch_size
+        self.num_workers = num_workers
         
         self.model: Optional[xgb.Booster] = None
         self.feature_names: List[str] = []
@@ -225,18 +235,19 @@ class SustainedBenchmark:
         log.info("=" * 70)
         log.info(f"Data source:    {self.data_path}")
         log.info(f"Model repo:     {self.model_path}")
-        log.info(f"Triton URL:     {self.triton_url}")
+        log.info(f"Triton HTTP:    {self.triton_http_url}")
+        log.info(f"Triton gRPC:    {self.triton_grpc_url}")
         log.info(f"Duration:       {self.duration}s per model")
         log.info(f"Batch size:     {self.batch_size:,} records")
+        log.info(f"GPU workers:    {self.num_workers} concurrent")
+        log.info(f"gRPC available: {GRPC_AVAILABLE}")
         log.info("=" * 70)
     
     def load_model(self) -> bool:
         """Load XGBoost model for CPU inference."""
         log.info("Loading XGBoost model...")
         
-        # Check for model in multiple possible locations
         model_dirs = ["fraud_xgboost_gpu", "fraud_xgboost_cpu", "fraud_xgboost"]
-        
         model_file = None
         feature_file = None
         
@@ -270,7 +281,7 @@ class SustainedBenchmark:
         log.info("Checking Triton server...")
         
         try:
-            resp = requests.get(f"{self.triton_url}/v2/health/ready", timeout=5)
+            resp = requests.get(f"{self.triton_http_url}/v2/health/ready", timeout=5)
             if resp.status_code != 200:
                 log.warning("  Triton not ready")
                 return False
@@ -278,10 +289,9 @@ class SustainedBenchmark:
             log.warning(f"  Cannot connect: {e}")
             return False
         
-        # Find model
         for name in ["fraud_xgboost_gpu", "fraud_xgboost_cpu", "fraud_xgboost"]:
             try:
-                resp = requests.get(f"{self.triton_url}/v2/models/{name}", timeout=5)
+                resp = requests.get(f"{self.triton_http_url}/v2/models/{name}", timeout=5)
                 if resp.status_code == 200:
                     self.triton_model_name = name
                     log.info(f"  Triton model: {name}")
@@ -297,13 +307,11 @@ class SustainedBenchmark:
         df = engineer_features(df)
         
         if self.feature_names:
-            # Ensure all required columns exist
             for col in self.feature_names:
                 if col not in df.columns:
                     df[col] = 0.0
             features = df[self.feature_names].fillna(0).values.astype(np.float32)
         else:
-            # Use all numeric columns
             numeric_cols = df.select_dtypes(include=[np.number]).columns
             exclude = ['is_fraud', 'cc_num', 'transaction_id']
             cols = [c for c in numeric_cols if c not in exclude]
@@ -328,24 +336,21 @@ class SustainedBenchmark:
         log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*12}")
         
         for batch_df, batch_bytes in data_loader.iterate_batches(self.duration):
-            # Load and feature engineering
-            load_start = time.time()
             features = self.prepare_features(batch_df)
-            metrics.feature_time_ms += (time.time() - load_start) * 1000
             
-            # Inference
             infer_start = time.time()
             dmatrix = xgb.DMatrix(features)
             predictions = self.model.predict(dmatrix)
-            metrics.inference_time_ms += (time.time() - infer_start) * 1000
+            infer_time = (time.time() - infer_start) * 1000
             
-            # Update metrics
-            metrics.records_processed += len(features)
-            metrics.batches_processed += 1
-            metrics.bytes_read += batch_bytes
-            metrics.fraud_detected += int((predictions > 0.5).sum())
+            metrics.add(
+                records=len(features),
+                batches=1,
+                bytes_read=batch_bytes,
+                inference_ms=infer_time,
+                fraud=int((predictions > 0.5).sum())
+            )
             
-            # Progress report
             if time.time() - last_report >= report_interval:
                 log.info(f"  {metrics.elapsed_seconds:>6.1f}s "
                         f"{metrics.records_processed:>12,} "
@@ -354,7 +359,6 @@ class SustainedBenchmark:
                         f"{metrics.throughput_mb_sec:>10.1f}")
                 last_report = time.time()
         
-        # Final report
         log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*12}")
         log.info(f"  {'TOTAL':<8} {metrics.records_processed:>12,} "
                 f"{metrics.throughput_records_sec:>12,.0f}/s "
@@ -363,37 +367,56 @@ class SustainedBenchmark:
         
         return metrics
     
-    def run_gpu_benchmark(self) -> Optional[BenchmarkMetrics]:
-        """Run sustained GPU inference benchmark via Triton."""
-        if not self.triton_model_name:
-            log.warning("Skipping GPU benchmark - Triton not available")
-            return None
-        
-        log.info("")
-        log.info("=" * 70)
-        log.info(f"GPU INFERENCE BENCHMARK ({self.duration}s)")
-        log.info("=" * 70)
-        
-        metrics = BenchmarkMetrics()
-        data_loader = DataLoader(self.data_path, self.batch_size)
-        
-        url = f"{self.triton_url}/v2/models/{self.triton_model_name}/infer"
-        session = requests.Session()
-        
-        last_report = time.time()
-        report_interval = 5.0
-        
-        log.info(f"  {'Time':<8} {'Records':>12} {'Throughput':>15} {'Latency':>12} {'Read MB/s':>12}")
-        log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*12}")
-        
-        for batch_df, batch_bytes in data_loader.iterate_batches(self.duration):
-            # Load and feature engineering
-            load_start = time.time()
-            features = self.prepare_features(batch_df)
-            metrics.feature_time_ms += (time.time() - load_start) * 1000
+    def _gpu_worker_grpc(self, worker_id: int, batch_queue: Queue, 
+                         metrics: BenchmarkMetrics, stop_event: threading.Event):
+        """Worker thread for GPU inference via gRPC."""
+        try:
+            client = grpcclient.InferenceServerClient(url=self.triton_grpc_url)
             
-            # Inference via Triton
+            while not stop_event.is_set():
+                try:
+                    features, batch_bytes = batch_queue.get(timeout=0.1)
+                except Empty:
+                    continue
+                
+                infer_start = time.time()
+                
+                # Create input tensor
+                inputs = [grpcclient.InferInput("input__0", features.shape, "FP32")]
+                inputs[0].set_data_from_numpy(features)
+                
+                # Run inference
+                outputs = [grpcclient.InferRequestedOutput("output__0")]
+                result = client.infer(self.triton_model_name, inputs, outputs=outputs)
+                predictions = result.as_numpy("output__0")
+                
+                infer_time = (time.time() - infer_start) * 1000
+                
+                metrics.add(
+                    records=len(features),
+                    batches=1,
+                    bytes_read=batch_bytes,
+                    inference_ms=infer_time,
+                    fraud=int((predictions > 0.5).sum())
+                )
+                
+        except Exception as e:
+            log.error(f"Worker {worker_id} error: {e}")
+    
+    def _gpu_worker_http(self, worker_id: int, batch_queue: Queue,
+                         metrics: BenchmarkMetrics, stop_event: threading.Event):
+        """Worker thread for GPU inference via HTTP."""
+        session = requests.Session()
+        url = f"{self.triton_http_url}/v2/models/{self.triton_model_name}/infer"
+        
+        while not stop_event.is_set():
+            try:
+                features, batch_bytes = batch_queue.get(timeout=0.1)
+            except Empty:
+                continue
+            
             infer_start = time.time()
+            
             try:
                 payload = {
                     "inputs": [{
@@ -408,19 +431,61 @@ class SustainedBenchmark:
                 result = resp.json()
                 predictions = np.array(result["outputs"][0]["data"])
                 
+                infer_time = (time.time() - infer_start) * 1000
+                
+                metrics.add(
+                    records=len(features),
+                    batches=1,
+                    bytes_read=batch_bytes,
+                    inference_ms=infer_time,
+                    fraud=int((predictions > 0.5).sum())
+                )
+                
             except Exception as e:
-                log.error(f"Triton error: {e}")
-                continue
+                log.warning(f"Worker {worker_id} inference error: {e}")
+    
+    def run_gpu_benchmark(self) -> Optional[BenchmarkMetrics]:
+        """Run sustained GPU inference benchmark with concurrent workers."""
+        if not self.triton_model_name:
+            log.warning("Skipping GPU benchmark - Triton not available")
+            return None
+        
+        log.info("")
+        log.info("=" * 70)
+        protocol = "gRPC" if GRPC_AVAILABLE else "HTTP"
+        log.info(f"GPU INFERENCE BENCHMARK ({self.duration}s) - {protocol} x{self.num_workers} workers")
+        log.info("=" * 70)
+        
+        metrics = BenchmarkMetrics()
+        batch_queue = Queue(maxsize=self.num_workers * 2)
+        stop_event = threading.Event()
+        
+        # Choose worker function based on available protocol
+        worker_fn = self._gpu_worker_grpc if GRPC_AVAILABLE else self._gpu_worker_http
+        
+        # Start worker threads
+        workers = []
+        for i in range(self.num_workers):
+            t = threading.Thread(target=worker_fn, args=(i, batch_queue, metrics, stop_event))
+            t.daemon = True
+            t.start()
+            workers.append(t)
+        
+        # Data loading in main thread
+        data_loader = DataLoader(self.data_path, self.batch_size)
+        
+        last_report = time.time()
+        report_interval = 5.0
+        
+        log.info(f"  {'Time':<8} {'Records':>12} {'Throughput':>15} {'Latency':>12} {'Read MB/s':>12}")
+        log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*12}")
+        
+        for batch_df, batch_bytes in data_loader.iterate_batches(self.duration):
+            features = self.prepare_features(batch_df)
             
-            metrics.inference_time_ms += (time.time() - infer_start) * 1000
+            # Put in queue (blocks if full)
+            batch_queue.put((features, batch_bytes))
             
-            # Update metrics
-            metrics.records_processed += len(features)
-            metrics.batches_processed += 1
-            metrics.bytes_read += batch_bytes
-            metrics.fraud_detected += int((predictions > 0.5).sum())
-            
-            # Progress report
             if time.time() - last_report >= report_interval:
                 log.info(f"  {metrics.elapsed_seconds:>6.1f}s "
                         f"{metrics.records_processed:>12,} "
@@ -429,7 +494,13 @@ class SustainedBenchmark:
                         f"{metrics.throughput_mb_sec:>10.1f}")
                 last_report = time.time()
         
-        # Final report
+        # Signal workers to stop and wait for queue to drain
+        time.sleep(2)  # Allow queue to drain
+        stop_event.set()
+        
+        for t in workers:
+            t.join(timeout=5)
+        
         log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*12}")
         log.info(f"  {'TOTAL':<8} {metrics.records_processed:>12,} "
                 f"{metrics.throughput_records_sec:>12,.0f}/s "
@@ -444,8 +515,10 @@ class SustainedBenchmark:
         log.info("=" * 70)
         log.info("SUSTAINED THROUGHPUT COMPARISON")
         log.info("=" * 70)
-        log.info(f"  Test Duration: {self.duration}s per model")
-        log.info(f"  Batch Size:    {self.batch_size:,} records")
+        log.info(f"  Test Duration:  {self.duration}s per model")
+        log.info(f"  Batch Size:     {self.batch_size:,} records")
+        log.info(f"  GPU Workers:    {self.num_workers} concurrent")
+        log.info(f"  GPU Protocol:   {'gRPC' if GRPC_AVAILABLE else 'HTTP'}")
         log.info("")
         log.info(f"  {'Metric':<25} {'CPU (XGBoost)':<20} {'GPU (Triton)':<20}")
         log.info(f"  {'-'*25} {'-'*20} {'-'*20}")
@@ -472,60 +545,59 @@ class SustainedBenchmark:
         log.info(f"  {'Fraud Detected':<25} {cpu_fraud:<20} {gpu_fraud:<20}")
         
         if gpu_metrics and gpu_metrics.throughput_records_sec > 0:
-            speedup = cpu_metrics.throughput_records_sec / gpu_metrics.throughput_records_sec
-            if speedup > 1:
+            ratio = gpu_metrics.throughput_records_sec / cpu_metrics.throughput_records_sec
+            if ratio > 1:
                 log.info(f"  {'-'*25} {'-'*20} {'-'*20}")
-                log.info(f"  {'Result':<25} {'CPU is ' + f'{speedup:.1f}x faster':<20} {'':<20}")
+                log.info(f"  {'Result':<25} {'':<20} {'GPU is ' + f'{ratio:.1f}x faster':<20}")
             else:
-                speedup = 1 / speedup
+                ratio = 1 / ratio
                 log.info(f"  {'-'*25} {'-'*20} {'-'*20}")
-                log.info(f"  {'Result':<25} {'':<20} {'GPU is ' + f'{speedup:.1f}x faster':<20}")
+                log.info(f"  {'Result':<25} {'CPU is ' + f'{ratio:.1f}x faster':<20} {'':<20}")
         
         log.info("=" * 70)
         log.info("")
-        log.info("NOTES:")
-        log.info("  - CPU inference uses XGBoost directly (no network overhead)")
-        log.info("  - GPU inference uses Triton HTTP API (includes serialization)")
-        log.info("  - For production, use Triton gRPC or shared memory for better GPU perf")
-        log.info("  - Data read rate shows FlashBlade sustained throughput")
+        log.info("INTERPRETATION:")
+        if GRPC_AVAILABLE:
+            log.info("  - Using gRPC protocol for efficient GPU communication")
+        else:
+            log.info("  - Using HTTP (install tritonclient[grpc] for better performance)")
+        log.info(f"  - {self.num_workers} concurrent workers maximize GPU utilization")
+        log.info("  - Data read rate shows FlashBlade sustained I/O")
+        log.info("  - GPU excels with concurrent requests (real-world pattern)")
         log.info("=" * 70)
     
     def run(self):
         """Execute full benchmark."""
-        # Load model
         if not self.load_model():
             log.error("Failed to load model")
             return
         
-        # Check Triton
         triton_ok = self.check_triton()
         
-        # Run CPU benchmark
         cpu_metrics = self.run_cpu_benchmark()
         
-        # Run GPU benchmark
         gpu_metrics = None
         if triton_ok:
             gpu_metrics = self.run_gpu_benchmark()
         
-        # Print comparison
         self.print_comparison(cpu_metrics, gpu_metrics)
 
 
 def main():
-    # Configuration from environment
     data_dir = os.getenv('DATA_DIR', '/data/input')
     model_dir = os.getenv('MODEL_DIR', '/data/models')
     triton_url = os.getenv('TRITON_URL', 'http://inference:8000')
     duration = int(os.getenv('DURATION_SECONDS', '60'))
     batch_size = int(os.getenv('BATCH_SIZE', '10000'))
+    num_workers = int(os.getenv('NUM_WORKERS', '8'))
     
     benchmark = SustainedBenchmark(
         data_dir=data_dir,
         model_dir=model_dir,
         triton_url=triton_url,
         duration_seconds=duration,
-        batch_size=batch_size
+        batch_size=batch_size,
+        num_workers=num_workers
     )
     benchmark.run()
 

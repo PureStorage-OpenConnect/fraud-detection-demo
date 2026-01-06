@@ -52,7 +52,8 @@ help:
 	@echo "Benchmark options:"
 	@echo "  BENCHMARK_DURATION=$(BENCHMARK_DURATION)s"
 	@echo "  BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE)"
-	@echo "  Example: make benchmark BENCHMARK_DURATION=120 BENCHMARK_BATCH_SIZE=50000"
+	@echo "  BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) (concurrent GPU workers)"
+	@echo "  Example: make benchmark BENCHMARK_DURATION=120 BENCHMARK_WORKERS=16"
 
 # Verify environment and paths
 env-check:
@@ -150,6 +151,7 @@ inference:
 # Benchmark settings
 BENCHMARK_DURATION ?= 60
 BENCHMARK_BATCH_SIZE ?= 10000
+BENCHMARK_WORKERS ?= 8
 
 # Run sustained throughput benchmark (CPU vs GPU)
 benchmark:
@@ -157,8 +159,9 @@ benchmark:
 	@echo "=========================================="
 	@echo "Sustained Throughput Benchmark: CPU vs GPU"
 	@echo "=========================================="
-	@echo "Duration:   $(BENCHMARK_DURATION)s per model"
-	@echo "Batch size: $(BENCHMARK_BATCH_SIZE) records"
+	@echo "Duration:    $(BENCHMARK_DURATION)s per model"
+	@echo "Batch size:  $(BENCHMARK_BATCH_SIZE) records"
+	@echo "GPU workers: $(BENCHMARK_WORKERS) concurrent (gRPC)"
 	@echo ""
 	@if [ ! -d "$(FB_DATA)" ] || [ -z "$$(ls -A $(FB_DATA)/run_* 2>/dev/null)" ]; then \
 		echo "ERROR: No data found at $(FB_DATA)/run_*/"; \
@@ -184,7 +187,7 @@ benchmark:
 		sleep 3; \
 	done
 	@echo ""
-	DURATION_SECONDS=$(BENCHMARK_DURATION) BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm benchmark
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) docker compose run --rm benchmark
 	@echo ""
 	@echo "Benchmark complete!"
 
@@ -205,7 +208,7 @@ benchmark-cpu:
 		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
 		exit 1; \
 	fi
-	DURATION_SECONDS=$(BENCHMARK_DURATION) BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm -e TRITON_URL=http://localhost:9999 benchmark
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm -e TRITON_URL=http://localhost:9999 benchmark
 
 # Test inference
 test:

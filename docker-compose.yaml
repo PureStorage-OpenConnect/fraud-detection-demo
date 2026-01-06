@@ -155,7 +155,8 @@ services:
 
   # ============================================================================
   # Pod 6: Inference Benchmark
-  # Sustained throughput test comparing CPU (XGBoost) vs GPU (Triton)
+  # Sustained throughput test comparing CPU (XGBoost) vs GPU (Triton gRPC)
+  # Uses concurrent workers to demonstrate GPU parallelism advantage
   # Input:  ${FB_DATA}/run_*/*.parquet (raw data from Pod 1)
   #         ${FA_MODEL_REPO}/fraud_xgboost*/ (model from Pod 3)
   # Output: Console performance comparison
@@ -172,8 +173,9 @@ services:
       - DATA_DIR=/data/input
       - MODEL_DIR=/data/models
       - TRITON_URL=http://inference:8000
-      - DURATION_SECONDS=${DURATION_SECONDS:-60}
-      - BATCH_SIZE=${BATCH_SIZE:-10000}
+      - DURATION_SECONDS=${BENCHMARK_DURATION:-60}
+      - BATCH_SIZE=${BENCHMARK_BATCH_SIZE:-10000}
+      - NUM_WORKERS=${BENCHMARK_WORKERS:-8}
     depends_on:
       inference:
         condition: service_healthy
