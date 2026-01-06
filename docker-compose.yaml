@@ -154,12 +154,13 @@ services:
       retries: 3
 
   # ============================================================================
-  # Pod 6: FlashArray Model Reload Stress Test
-  # Demonstrates low-latency model serving from Pure Storage FlashArray
-  # Continuously loads models to stress test storage I/O
+  # Pod 6: Storage & Inference Stress Test
+  # Demonstrates Pure Storage FlashArray + NVIDIA Triton performance
+  # - FlashArray test: Model loading I/O (defeats page cache)
+  # - Triton test: Sustained inference throughput via gRPC
   # Input:  ${FA_MODEL_REPO}/fraud_xgboost*/ (model from Pod 3)
   #         ${FB_DATA}/run_*/*.parquet (test data from Pod 1)
-  # Output: Console performance metrics
+  # Output: Console performance metrics + Grafana dashboards
   # ============================================================================
   benchmark:
     build: ./pods/benchmark
@@ -171,13 +172,20 @@ services:
       # Data from FlashBlade (for test inference)
       - ${FB_DATA}:/data/input:ro
     environment:
+      # Common settings
       - MODEL_DIR=/data/models
       - DATA_DIR=/data/input
       - DURATION_SECONDS=${BENCHMARK_DURATION:-60}
+      # FlashArray test settings
+      - RUN_FLASHARRAY=${RUN_FLASHARRAY:-true}
       - NUM_WORKERS=${BENCHMARK_WORKERS:-8}
       - NUM_MODEL_COPIES=${BENCHMARK_COPIES:-100}
-      - RUN_INFERENCE=${BENCHMARK_INFERENCE:-false}
-      - INFERENCE_BATCH_SIZE=${BENCHMARK_BATCH_SIZE:-1000}
+      - RUN_INFERENCE=false
+      # Triton test settings
+      - RUN_TRITON=${RUN_TRITON:-false}
+      - TRITON_GRPC_URL=inference:8001
+      - TRITON_WORKERS=${TRITON_WORKERS:-8}
+      - TRITON_BATCH_SIZE=${TRITON_BATCH_SIZE:-1000}
     networks:
       - fraud-net
 

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Pod 6: FlashArray Model Reload Stress Test (Cache-Defeating)
-Demonstrates low-latency model serving from Pure Storage FlashArray.
+Pod 6: Storage & Inference Stress Test
+Demonstrates Pure Storage FlashArray + NVIDIA Triton performance.
 
-This version defeats Linux page cache by:
-1. Creating multiple model copies and reading them round-robin
-2. Using O_DIRECT where possible to bypass cache
-3. Attempting to drop caches if running with privileges
-4. Reading unique files so kernel can't serve from cache
+Two test phases:
+1. FlashArray Model I/O - Defeats page cache with multiple model copies
+2. Triton Inference - Sustained inference throughput via gRPC
+
+This provides metrics for both:
+- Grafana FlashArray panels (IOPS, bandwidth, latency)
+- Grafana Triton panels (inference rate, compute latency)
 """
 
 import os
@@ -25,10 +27,18 @@ from dataclasses import dataclass, field
 import statistics
 import random
 import tempfile
+from queue import Queue, Empty
 
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+
+# Optional Triton gRPC client
+try:
+    import tritonclient.grpc as grpcclient
+    GRPC_AVAILABLE = True
+except ImportError:
+    GRPC_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -532,15 +542,271 @@ class FlashArrayStressTest:
         """Execute full stress test."""
         try:
             if not self.setup():
-                return
+                return None, None
             
             single_metrics = self.run_single_thread_test()
             time.sleep(2)
             multi_metrics = self.run_multi_thread_test()
             self.print_comparison(single_metrics, multi_metrics)
+            return single_metrics, multi_metrics
             
         finally:
             self.cleanup()
+
+
+class TritonInferenceStressTest:
+    """
+    Stress test for Triton Inference Server.
+    
+    Sends sustained inference requests via gRPC to demonstrate:
+    - Inference throughput (req/s)
+    - Compute latency
+    - GPU utilization under load
+    """
+    
+    def __init__(
+        self,
+        triton_url: str,
+        model_name: str,
+        data_dir: str,
+        feature_names: List[str],
+        duration_seconds: int = 60,
+        num_workers: int = 8,
+        batch_size: int = 1000
+    ):
+        self.triton_url = triton_url
+        self.model_name = model_name
+        self.data_path = Path(data_dir)
+        self.feature_names = feature_names
+        self.duration = duration_seconds
+        self.num_workers = num_workers
+        self.batch_size = batch_size
+        
+        self.test_batches: List[np.ndarray] = []
+        
+        log.info("")
+        log.info("=" * 70)
+        log.info("TRITON INFERENCE STRESS TEST")
+        log.info("=" * 70)
+        log.info(f"Triton URL:      {self.triton_url}")
+        log.info(f"Model:           {self.model_name}")
+        log.info(f"Duration:        {self.duration}s")
+        log.info(f"Workers:         {self.num_workers} concurrent")
+        log.info(f"Batch size:      {self.batch_size} records")
+        log.info(f"gRPC available:  {GRPC_AVAILABLE}")
+        log.info("=" * 70)
+    
+    def setup(self) -> bool:
+        """Prepare test data batches."""
+        if not GRPC_AVAILABLE:
+            log.error("tritonclient[grpc] not installed!")
+            log.error("Install with: pip install tritonclient[grpc]")
+            return False
+        
+        # Check Triton connectivity
+        try:
+            client = grpcclient.InferenceServerClient(url=self.triton_url)
+            if not client.is_server_live():
+                log.error(f"Triton server not live at {self.triton_url}")
+                return False
+            if not client.is_model_ready(self.model_name):
+                log.error(f"Model {self.model_name} not ready")
+                return False
+            log.info(f"  Triton server ready, model {self.model_name} loaded")
+        except Exception as e:
+            log.error(f"Cannot connect to Triton: {e}")
+            return False
+        
+        # Load test data
+        log.info("  Loading test data...")
+        test_data = self._load_test_data()
+        if test_data is None:
+            log.error("Could not load test data")
+            return False
+        
+        # Create multiple batches for variety
+        num_batches = min(100, len(test_data) // self.batch_size)
+        if num_batches < 1:
+            num_batches = 1
+        
+        indices = np.arange(len(test_data))
+        np.random.shuffle(indices)
+        
+        for i in range(num_batches):
+            start = (i * self.batch_size) % len(test_data)
+            end = start + self.batch_size
+            if end > len(test_data):
+                batch = test_data[start:]
+                batch = np.vstack([batch, test_data[:end - len(test_data)]])
+            else:
+                batch = test_data[start:end]
+            self.test_batches.append(batch.astype(np.float32))
+        
+        log.info(f"  Created {len(self.test_batches)} test batches of {self.batch_size} records")
+        return True
+    
+    def _load_test_data(self) -> Optional[np.ndarray]:
+        """Load data and apply feature engineering."""
+        try:
+            run_dirs = sorted([
+                d for d in self.data_path.iterdir()
+                if d.is_dir() and d.name.startswith("run_")
+            ])
+            
+            if not run_dirs:
+                return None
+            
+            parquet_files = list(run_dirs[-1].glob("worker_*.parquet"))[:5]
+            if not parquet_files:
+                return None
+            
+            dfs = [pd.read_parquet(f) for f in parquet_files]
+            df = pd.concat(dfs, ignore_index=True)
+            
+            # Feature engineering
+            if 'amt' in df.columns:
+                df['amt_log'] = np.log1p(df['amt'])
+                df['amt_scaled'] = (df['amt'] - df['amt'].mean()) / (df['amt'].std() + 0.001)
+            
+            if 'unix_time' in df.columns:
+                df['hour_of_day'] = (df['unix_time'] / 3600) % 24
+                df['day_of_week'] = ((df['unix_time'] / 86400) % 7).astype('int8')
+                df['is_weekend'] = (df['day_of_week'] >= 5).astype('int8')
+                df['is_night'] = ((df['hour_of_day'] >= 22) | (df['hour_of_day'] <= 6)).astype('int8')
+            
+            if all(c in df.columns for c in ['lat', 'long', 'merch_lat', 'merch_long']):
+                df['distance_km'] = np.sqrt(
+                    ((df['merch_lat'] - df['lat']) * 111.0)**2 +
+                    ((df['merch_long'] - df['long']) * 85.0)**2
+                )
+            
+            for col in ['category_encoded', 'state_encoded', 'gender_encoded', 
+                       'city_pop_log', 'zip_region']:
+                if col not in df.columns:
+                    df[col] = 0
+            
+            if self.feature_names:
+                for col in self.feature_names:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                return df[self.feature_names].fillna(0).values.astype(np.float32)
+            
+            return None
+                
+        except Exception as e:
+            log.warning(f"Could not load test data: {e}")
+            return None
+    
+    def _worker_inference(self, worker_id: int, metrics: LoadMetrics, 
+                          stop_event: threading.Event):
+        """Worker that sends inference requests to Triton."""
+        try:
+            client = grpcclient.InferenceServerClient(url=self.triton_url)
+        except Exception as e:
+            log.error(f"Worker {worker_id} failed to connect: {e}")
+            return
+        
+        batch_idx = worker_id % len(self.test_batches)
+        
+        while not stop_event.is_set():
+            try:
+                batch = self.test_batches[batch_idx % len(self.test_batches)]
+                batch_idx += 1
+                
+                # Prepare input
+                inputs = [grpcclient.InferInput("input__0", batch.shape, "FP32")]
+                inputs[0].set_data_from_numpy(batch)
+                
+                outputs = [grpcclient.InferRequestedOutput("output__0")]
+                
+                # Time inference
+                start = time.time()
+                result = client.infer(self.model_name, inputs, outputs=outputs)
+                latency_ms = (time.time() - start) * 1000
+                
+                # Record metrics
+                metrics.add_load(latency_ms, len(batch))
+                
+                # Count fraud predictions
+                predictions = result.as_numpy("output__0")
+                fraud_count = int((predictions > 0.5).sum())
+                metrics.add_inference(fraud_count)
+                
+            except Exception as e:
+                if not stop_event.is_set():
+                    log.warning(f"Worker {worker_id} inference error: {e}")
+                time.sleep(0.1)
+    
+    def run(self) -> Optional[LoadMetrics]:
+        """Run Triton inference stress test."""
+        if not self.setup():
+            return None
+        
+        metrics = LoadMetrics()
+        stop_event = threading.Event()
+        
+        # Start workers
+        workers = []
+        for i in range(self.num_workers):
+            t = threading.Thread(
+                target=self._worker_inference,
+                args=(i, metrics, stop_event)
+            )
+            t.daemon = True
+            t.start()
+            workers.append(t)
+        
+        last_report = time.time()
+        report_interval = 5.0
+        
+        log.info(f"  {'Time':<8} {'Inferences':>12} {'Throughput':>15} {'Latency':>12} {'Fraud':>10}")
+        log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*10}")
+        
+        start_time = time.time()
+        while (time.time() - start_time) < self.duration:
+            time.sleep(1)
+            
+            if time.time() - last_report >= report_interval:
+                records = metrics.load_count * self.batch_size
+                throughput = records / metrics.elapsed_seconds
+                log.info(f"  {metrics.elapsed_seconds:>6.1f}s "
+                        f"{records:>12,} "
+                        f"{throughput:>12,.0f}/s "
+                        f"{metrics.avg_load_time_ms:>10.2f}ms "
+                        f"{metrics.inference_count:>10,}")
+                last_report = time.time()
+        
+        stop_event.set()
+        for t in workers:
+            t.join(timeout=2)
+        
+        # Final results
+        total_records = metrics.load_count * self.batch_size
+        throughput = total_records / metrics.elapsed_seconds
+        
+        log.info(f"  {'-'*8} {'-'*12} {'-'*15} {'-'*12} {'-'*10}")
+        log.info(f"  {'TOTAL':<8} {total_records:>12,} {throughput:>12,.0f}/s "
+                f"{metrics.avg_load_time_ms:>10.2f}ms {metrics.inference_count:>10,}")
+        
+        log.info("")
+        log.info("=" * 70)
+        log.info("TRITON INFERENCE RESULTS")
+        log.info("=" * 70)
+        log.info(f"  Duration:           {self.duration}s")
+        log.info(f"  Workers:            {self.num_workers}")
+        log.info(f"  Batch Size:         {self.batch_size}")
+        log.info(f"  Total Inferences:   {metrics.load_count:,} batches ({total_records:,} records)")
+        log.info(f"  Throughput:         {throughput:,.0f} records/sec")
+        log.info(f"  Avg Batch Latency:  {metrics.avg_load_time_ms:.2f}ms")
+        log.info(f"  P95 Batch Latency:  {metrics.p95_load_time_ms:.2f}ms")
+        log.info(f"  P99 Batch Latency:  {metrics.p99_load_time_ms:.2f}ms")
+        log.info(f"  Fraud Detected:     {metrics.inference_count:,}")
+        log.info("=" * 70)
+        log.info("")
+        log.info("  → Check Grafana for Triton metrics (Inference Rate, Compute Latency)")
+        log.info("=" * 70)
+        
+        return metrics
 
 
 def main():
@@ -552,16 +818,65 @@ def main():
     run_inference = os.getenv('RUN_INFERENCE', 'false').lower() == 'true'
     inference_batch = int(os.getenv('INFERENCE_BATCH_SIZE', '1000'))
     
-    stress_test = FlashArrayStressTest(
-        model_dir=model_dir,
-        data_dir=data_dir,
-        duration_seconds=duration,
-        num_workers=num_workers,
-        num_model_copies=num_copies,
-        run_inference=run_inference,
-        inference_batch_size=inference_batch
-    )
-    stress_test.run()
+    # Test selection
+    run_flasharray = os.getenv('RUN_FLASHARRAY', 'true').lower() == 'true'
+    run_triton = os.getenv('RUN_TRITON', 'false').lower() == 'true'
+    triton_url = os.getenv('TRITON_GRPC_URL', 'inference:8001')
+    triton_workers = int(os.getenv('TRITON_WORKERS', '8'))
+    triton_batch = int(os.getenv('TRITON_BATCH_SIZE', '1000'))
+    
+    # Find model name and features
+    model_name = None
+    feature_names = []
+    model_path = Path(model_dir)
+    
+    for model_dir_name in ["fraud_xgboost_gpu", "fraud_xgboost_cpu", "fraud_xgboost"]:
+        candidate = model_path / model_dir_name
+        if candidate.exists():
+            model_name = model_dir_name
+            feature_file = candidate / "feature_names.json"
+            if feature_file.exists():
+                with open(feature_file) as f:
+                    feature_names = json.load(f)
+            break
+    
+    # Run FlashArray stress test
+    if run_flasharray:
+        stress_test = FlashArrayStressTest(
+            model_dir=model_dir,
+            data_dir=data_dir,
+            duration_seconds=duration,
+            num_workers=num_workers,
+            num_model_copies=num_copies,
+            run_inference=run_inference,
+            inference_batch_size=inference_batch
+        )
+        stress_test.run()
+    
+    # Run Triton inference stress test
+    if run_triton:
+        if not model_name:
+            log.error("No model found for Triton test")
+            return
+        
+        if not GRPC_AVAILABLE:
+            log.error("Triton gRPC client not available")
+            log.error("Install with: pip install tritonclient[grpc]")
+            return
+        
+        triton_test = TritonInferenceStressTest(
+            triton_url=triton_url,
+            model_name=model_name,
+            data_dir=data_dir,
+            feature_names=feature_names,
+            duration_seconds=duration,
+            num_workers=triton_workers,
+            batch_size=triton_batch
+        )
+        triton_test.run()
+    
+    if not run_flasharray and not run_triton:
+        log.warning("No tests enabled! Set RUN_FLASHARRAY=true or RUN_TRITON=true")
 
 
 if __name__ == "__main__":

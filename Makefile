@@ -30,8 +30,10 @@ help:
 	@echo "  make build       Build all containers"
 	@echo "  make pipeline    Run full pipeline (pods 1-3)"
 	@echo "  make inference   Start inference server (pod 4)"
-	@echo "  make benchmark   Run FlashArray model reload stress test (pod 6)"
-	@echo "  make benchmark-io  Run pure I/O stress test (no inference)"
+	@echo "  make benchmark   Run FlashArray stress test (pod 6)"
+	@echo "  make benchmark-triton  Run Triton inference stress test"
+	@echo "  make benchmark-all     Run both FlashArray and Triton tests"
+	@echo "  make benchmark-io      Run aggressive FlashArray I/O test"
 	@echo "  make test        Test inference endpoint"
 	@echo "  make stop        Stop all containers"
 	@echo "  make clean-data  Remove generated data"
@@ -42,7 +44,7 @@ help:
 	@echo "  make pod1        Run data generator"
 	@echo "  make pod2        Run feature engineering (CPU vs GPU comparison)"
 	@echo "  make pod3        Run model training"
-	@echo "  make pod6        Run FlashArray stress test"
+	@echo "  make pod6        Run benchmark (FlashArray stress test)"
 	@echo ""
 	@echo "Configuration (from .env):"
 	@echo "  FB_DATA=$(FB_DATA)"
@@ -50,12 +52,14 @@ help:
 	@echo "  FA_MODEL_REPO=$(FA_MODEL_REPO)"
 	@echo "  DURATION_SECONDS=$(DURATION_SECONDS)s NUM_WORKERS=$(NUM_WORKERS)"
 	@echo ""
-	@echo "Benchmark options (FlashArray stress test):"
-	@echo "  BENCHMARK_DURATION=$(BENCHMARK_DURATION)s"
-	@echo "  BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) (concurrent model loaders)"
-	@echo "  BENCHMARK_COPIES=$(BENCHMARK_COPIES) (defeats page cache)"
-	@echo "  BENCHMARK_INFERENCE=$(BENCHMARK_INFERENCE)"
-	@echo "  Example: make benchmark BENCHMARK_DURATION=120 BENCHMARK_WORKERS=32 BENCHMARK_COPIES=200"
+	@echo "Benchmark options:"
+	@echo "  FlashArray:  BENCHMARK_DURATION=$(BENCHMARK_DURATION)s BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_COPIES=$(BENCHMARK_COPIES)"
+	@echo "  Triton:      TRITON_WORKERS=$(TRITON_WORKERS) TRITON_BATCH_SIZE=$(TRITON_BATCH_SIZE)"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make benchmark BENCHMARK_WORKERS=64 BENCHMARK_COPIES=200"
+	@echo "  make benchmark-triton TRITON_WORKERS=16 TRITON_BATCH_SIZE=5000"
+	@echo "  make benchmark-all BENCHMARK_DURATION=120"
 
 # Verify environment and paths
 env-check:
@@ -154,10 +158,10 @@ inference:
 BENCHMARK_DURATION ?= 60
 BENCHMARK_WORKERS ?= 8
 BENCHMARK_COPIES ?= 100
-BENCHMARK_INFERENCE ?= false
-BENCHMARK_BATCH_SIZE ?= 1000
+TRITON_WORKERS ?= 8
+TRITON_BATCH_SIZE ?= 1000
 
-# Run FlashArray model reload stress test
+# Run FlashArray model reload stress test (default)
 benchmark:
 	@echo ""
 	@echo "=========================================="
@@ -166,7 +170,6 @@ benchmark:
 	@echo "Duration:       $(BENCHMARK_DURATION)s per test"
 	@echo "Workers:        $(BENCHMARK_WORKERS) concurrent"
 	@echo "Model copies:   $(BENCHMARK_COPIES) (defeats page cache)"
-	@echo "Run inference:  $(BENCHMARK_INFERENCE)"
 	@echo ""
 	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
 		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
@@ -176,10 +179,69 @@ benchmark:
 	fi
 	@ls -d $(FA_MODEL_REPO)/fraud_xgboost* 2>/dev/null | head -1 | xargs -I{} echo "  Found model: {}"
 	@echo ""
-	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_COPIES=$(BENCHMARK_COPIES) BENCHMARK_INFERENCE=$(BENCHMARK_INFERENCE) BENCHMARK_BATCH_SIZE=$(BENCHMARK_BATCH_SIZE) docker compose run --rm benchmark
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_COPIES=$(BENCHMARK_COPIES) RUN_FLASHARRAY=true RUN_TRITON=false docker compose run --rm benchmark
 	@echo ""
 	@echo "Stress test complete!"
 	@echo "Check Grafana for FlashArray I/O metrics"
+
+# Run Triton inference stress test
+benchmark-triton:
+	@echo ""
+	@echo "=========================================="
+	@echo "Triton Inference Stress Test"
+	@echo "=========================================="
+	@echo "Duration:       $(BENCHMARK_DURATION)s"
+	@echo "Workers:        $(TRITON_WORKERS) concurrent"
+	@echo "Batch size:     $(TRITON_BATCH_SIZE) records"
+	@echo ""
+	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
+		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
+		exit 1; \
+	fi
+	@echo "Starting Triton server if not running..."
+	@docker compose up -d inference
+	@echo "Waiting for Triton to be ready..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		if curl -s http://localhost:8000/v2/health/ready > /dev/null 2>&1; then \
+			echo "  Triton ready!"; \
+			break; \
+		fi; \
+		echo "  Waiting... ($$i/10)"; \
+		sleep 3; \
+	done
+	@echo ""
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) TRITON_WORKERS=$(TRITON_WORKERS) TRITON_BATCH_SIZE=$(TRITON_BATCH_SIZE) RUN_FLASHARRAY=false RUN_TRITON=true docker compose run --rm benchmark
+	@echo ""
+	@echo "Inference test complete!"
+	@echo "Check Grafana for Triton metrics (Inference Rate, Compute Latency)"
+
+# Run both FlashArray and Triton stress tests
+benchmark-all:
+	@echo ""
+	@echo "=========================================="
+	@echo "Full Storage & Inference Stress Test"
+	@echo "=========================================="
+	@echo ""
+	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
+		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
+		exit 1; \
+	fi
+	@echo "Starting Triton server if not running..."
+	@docker compose up -d inference
+	@echo "Waiting for Triton to be ready..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		if curl -s http://localhost:8000/v2/health/ready > /dev/null 2>&1; then \
+			echo "  Triton ready!"; \
+			break; \
+		fi; \
+		echo "  Waiting... ($$i/10)"; \
+		sleep 3; \
+	done
+	@echo ""
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_COPIES=$(BENCHMARK_COPIES) TRITON_WORKERS=$(TRITON_WORKERS) TRITON_BATCH_SIZE=$(TRITON_BATCH_SIZE) RUN_FLASHARRAY=true RUN_TRITON=true docker compose run --rm benchmark
+	@echo ""
+	@echo "Full stress test complete!"
+	@echo "Check Grafana for FlashArray and Triton metrics"
 
 # Run FlashArray stress test with more copies (aggressive cache defeat)
 benchmark-io:
@@ -188,14 +250,14 @@ benchmark-io:
 	@echo "FlashArray Aggressive I/O Stress Test"
 	@echo "=========================================="
 	@echo "Duration:       $(BENCHMARK_DURATION)s per test"
-	@echo "Workers:        $(BENCHMARK_WORKERS) concurrent"
+	@echo "Workers:        64 concurrent"
 	@echo "Model copies:   200 (aggressive cache defeat)"
 	@echo ""
 	@if [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_gpu" ] && [ ! -d "$(FA_MODEL_REPO)/fraud_xgboost_cpu" ]; then \
 		echo "ERROR: Model not found at $(FA_MODEL_REPO)/"; \
 		exit 1; \
 	fi
-	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=$(BENCHMARK_WORKERS) BENCHMARK_COPIES=200 BENCHMARK_INFERENCE=false docker compose run --rm benchmark
+	BENCHMARK_DURATION=$(BENCHMARK_DURATION) BENCHMARK_WORKERS=64 BENCHMARK_COPIES=200 RUN_FLASHARRAY=true RUN_TRITON=false docker compose run --rm benchmark
 
 # Test inference
 test:
