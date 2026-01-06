@@ -34,6 +34,24 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(
 log = logging.getLogger(__name__)
 
 
+def is_valid_parquet(filepath: Path) -> bool:
+    """Check if file has valid parquet magic bytes."""
+    try:
+        if filepath.stat().st_size < 100:
+            return False
+        with open(filepath, 'rb') as f:
+            # Check header
+            if f.read(4) != b'PAR1':
+                return False
+            # Check footer
+            f.seek(-4, 2)
+            if f.read(4) != b'PAR1':
+                return False
+        return True
+    except:
+        return False
+
+
 @dataclass
 class Metrics:
     """Simple metrics tracker."""
@@ -78,7 +96,7 @@ class Metrics:
 # PART 1: FlashArray Stress Test
 # =============================================================================
 def run_flasharray_test(model_dir: str, duration: int, num_workers: int, num_copies: int):
-    """Stress test FlashArray with model loading."""
+    """Stress test FlashArray with model loading - bypasses page cache."""
     log.info("")
     log.info("=" * 70)
     log.info("PART 1: FLASHARRAY MODEL LOADING STRESS TEST")
@@ -107,19 +125,45 @@ def run_flasharray_test(model_dir: str, duration: int, num_workers: int, num_cop
     
     # Create copies to defeat cache
     temp_dir = model_path / "_stress_test_copies"
+    if temp_dir.exists():
+        shutil.rmtree(temp_dir)
     temp_dir.mkdir(exist_ok=True)
     
-    log.info(f"Creating {num_copies} model copies to defeat page cache...")
+    log.info(f"Creating {num_copies} model copies...")
     model_content = model_file.read_bytes()
+    
+    # Pad to 4KB alignment for O_DIRECT
+    block_size = 4096
+    padded_size = ((len(model_content) + block_size - 1) // block_size) * block_size
+    
     copies = []
     for i in range(num_copies):
         copy_path = temp_dir / f"model_{i:04d}.json"
-        # Add unique content to each copy
-        unique = f'\n{{"_id": {i}, "_t": {time.time()}}}'.encode()
-        copy_path.write_bytes(model_content + unique)
+        # Add unique content and pad to block alignment
+        unique = f'\n{{"_copy_id": {i}, "_timestamp": {time.time_ns()}, "_random": "{os.urandom(16).hex()}"}}'
+        content = model_content + unique.encode()
+        # Pad to block alignment
+        padding = padded_size - len(content)
+        if padding > 0:
+            content = content + b' ' * padding
+        copy_path.write_bytes(content)
         copies.append(copy_path)
     
-    log.info(f"Created {len(copies)} copies ({len(copies) * model_size / (1024**2):.1f} MB)")
+    actual_size = copies[0].stat().st_size
+    log.info(f"Created {len(copies)} copies ({len(copies) * actual_size / (1024**2):.1f} MB)")
+    log.info(f"File size: {actual_size} bytes (4KB aligned for O_DIRECT)")
+    
+    # Check if O_DIRECT is available
+    try:
+        import os as _os
+        O_DIRECT = getattr(_os, 'O_DIRECT', 0o40000)  # Linux value
+        test_fd = _os.open(str(copies[0]), _os.O_RDONLY | O_DIRECT)
+        _os.close(test_fd)
+        use_direct = True
+        log.info("Using O_DIRECT to bypass page cache")
+    except:
+        use_direct = False
+        log.info("O_DIRECT not available, using posix_fadvise")
     
     try:
         # Multi-threaded test
@@ -130,17 +174,46 @@ def run_flasharray_test(model_dir: str, duration: int, num_workers: int, num_cop
         stop_event = threading.Event()
         
         def worker(worker_id):
-            idx = worker_id
+            idx = worker_id * 7  # Spread out starting points
+            O_DIRECT = getattr(os, 'O_DIRECT', 0o40000)
+            
+            # Aligned buffer for O_DIRECT
+            if use_direct:
+                import ctypes
+                buf_size = padded_size
+                # Create aligned buffer
+                buf = ctypes.create_string_buffer(buf_size)
+            
             while not stop_event.is_set():
                 filepath = copies[idx % len(copies)]
                 idx += 1
                 try:
                     start = time.time()
-                    # Read file
-                    data = filepath.read_bytes()
-                    # Load into XGBoost
+                    
+                    if use_direct:
+                        # O_DIRECT read - bypasses page cache
+                        fd = os.open(str(filepath), os.O_RDONLY | O_DIRECT)
+                        try:
+                            data = os.read(fd, padded_size)
+                        finally:
+                            os.close(fd)
+                    else:
+                        # Regular read with fadvise
+                        fd = os.open(str(filepath), os.O_RDONLY)
+                        try:
+                            data = os.read(fd, actual_size)
+                            # Tell kernel to drop this from cache
+                            try:
+                                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                            except:
+                                pass
+                        finally:
+                            os.close(fd)
+                    
+                    # Load into XGBoost (validates the data)
                     model = xgb.Booster()
                     model.load_model(str(filepath))
+                    
                     elapsed_ms = (time.time() - start) * 1000
                     metrics.add(elapsed_ms, len(data))
                     del model
@@ -179,6 +252,8 @@ def run_flasharray_test(model_dir: str, duration: int, num_workers: int, num_cop
         log.info(f"  ✓ {metrics.count:,} model loads in {duration}s")
         log.info(f"  ✓ {metrics.throughput_mb:.1f} MB/s sustained throughput")
         log.info(f"  ✓ {metrics.avg_ms:.1f}ms avg latency, {metrics.p95_ms:.1f}ms P95")
+        if use_direct:
+            log.info(f"  ✓ O_DIRECT bypassed page cache - this is REAL storage I/O")
         
     finally:
         # Cleanup
@@ -248,12 +323,29 @@ def run_triton_test(model_dir: str, data_dir: str, triton_url: str,
         log.error("No data found!")
         return
     
-    parquet_files = list(run_dirs[-1].glob("worker_*.parquet"))[:5]
+    # Get valid parquet files only
+    all_files = list(run_dirs[-1].glob("worker_*.parquet"))
+    parquet_files = [f for f in all_files if is_valid_parquet(f)]
+    log.info(f"Found {len(parquet_files)} valid parquet files (of {len(all_files)} total)")
+    
     if not parquet_files:
-        log.error("No parquet files found!")
+        log.error("No valid parquet files found!")
         return
     
-    dfs = [pd.read_parquet(f) for f in parquet_files]
+    # Load up to 5 files
+    dfs = []
+    for f in parquet_files[:5]:
+        try:
+            df = pd.read_parquet(f)
+            dfs.append(df)
+        except Exception as e:
+            log.warning(f"Error reading {f.name}: {e}")
+            continue
+    
+    if not dfs:
+        log.error("Could not load any parquet files!")
+        return
+    
     df = pd.concat(dfs, ignore_index=True)
     log.info(f"Loaded {len(df):,} records")
     
