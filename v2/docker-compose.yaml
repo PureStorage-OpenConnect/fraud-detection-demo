@@ -1,0 +1,96 @@
+version: '3.8'
+
+# Fraud Detection Demo v2 - Docker Compose
+# 4 containers: dashboard, worker-cpu, worker-gpu, triton
+
+services:
+  # Dashboard / Orchestrator
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: demo-dashboard
+    ports:
+      - "8080:5000"
+    environment:
+      - CPU_WORKER_URL=http://worker-cpu:5001
+      - GPU_WORKER_URL=http://worker-gpu:5002
+      - DASHBOARD_PORT=5000
+    networks:
+      - demo-net
+    depends_on:
+      - worker-cpu
+      - worker-gpu
+    restart: unless-stopped
+
+  # CPU Worker
+  worker-cpu:
+    build:
+      context: ./worker-cpu
+      dockerfile: Dockerfile
+    container_name: demo-worker-cpu
+    environment:
+      - DASHBOARD_URL=http://dashboard:5000
+      - TRITON_URL=http://triton:8000
+      - DATA_DIR=/data/cpu
+      - MODEL_DIR=/models
+      - WORKER_PORT=5001
+    volumes:
+      - ${DATA_PATH:-./data}:/data:ro
+      - ${MODEL_PATH:-./models}:/models
+    networks:
+      - demo-net
+    restart: unless-stopped
+
+  # GPU Worker
+  worker-gpu:
+    build:
+      context: ./worker-gpu
+      dockerfile: Dockerfile
+    container_name: demo-worker-gpu
+    environment:
+      - DASHBOARD_URL=http://dashboard:5000
+      - TRITON_URL=http://triton:8000
+      - DATA_DIR=/data/gpu
+      - MODEL_DIR=/models
+      - WORKER_PORT=5002
+    volumes:
+      - ${DATA_PATH:-./data}:/data:ro
+      - ${MODEL_PATH:-./models}:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '8gb'
+    networks:
+      - demo-net
+    restart: unless-stopped
+
+  # Triton Inference Server
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.02-py3
+    container_name: demo-triton
+    command: ["tritonserver", "--model-repository=/models", "--strict-model-config=false"]
+    ports:
+      - "8000:8000"  # HTTP
+      - "8001:8001"  # gRPC
+      - "8002:8002"  # Metrics
+    volumes:
+      - ${MODEL_PATH:-./models}:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - demo-net
+    restart: unless-stopped
+
+networks:
+  demo-net:
+    driver: bridge

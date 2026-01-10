@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pure Storage - Fraud Detection Demo v2</title>
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+    <link rel="stylesheet" href="/static/css/dashboard.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="logo-section">
+            <div class="pure-logo">
+                <div class="pure-logo-icon">P</div>
+                <div class="pure-logo-text">Pure<span>Storage</span></div>
+            </div>
+            <div class="demo-title">AI/ML Fraud Detection Pipeline Demo</div>
+        </div>
+        <div class="header-right">
+            <div class="flashblade-badge" id="flashblade-status">
+                <span>⚡</span> FlashBlade
+            </div>
+            <div class="nvidia-badge">NVIDIA GPU</div>
+            <div class="live-indicator" id="live-indicator" style="display: none;">
+                <div class="live-dot"></div>
+                LIVE
+            </div>
+        </div>
+    </header>
+
+    <!-- Stage Navigation -->
+    <nav class="stage-nav">
+        <div class="stage-pill" data-stage="ingest">Ingest</div>
+        <div class="stage-connector">→</div>
+        <div class="stage-pill" data-stage="data_prep">Data Prep</div>
+        <div class="stage-connector">→</div>
+        <div class="stage-pill" data-stage="model_train">Model Train</div>
+        <div class="stage-connector">→</div>
+        <div class="stage-pill" data-stage="inference">Inference</div>
+    </nav>
+
+    <!-- Main Content - Stage View -->
+    <main class="main-content" id="stage-view">
+        <div class="stage-header">
+            <h1 class="stage-title" id="stage-title">Ready to Start</h1>
+            <p class="stage-subtitle" id="stage-subtitle">Click Start to begin the fraud detection pipeline</p>
+        </div>
+
+        <div class="comparison-grid">
+            <!-- CPU Path -->
+            <div class="path-card">
+                <div class="path-header cpu">
+                    <div class="path-title cpu">
+                        <div class="path-icon cpu">⚙️</div>
+                        CPU Path
+                    </div>
+                    <div class="path-status" id="cpu-status">Ready</div>
+                </div>
+                <div class="path-metrics">
+                    <!-- Rows Processed -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Rows Processed</span>
+                            <span class="flashblade-badge small">FlashBlade</span>
+                        </div>
+                        <div class="metric-value cpu" id="cpu-rows">0</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill cpu" id="cpu-progress" style="width: 0%"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="cpu-progress-pct">0%</span>
+                            <span id="cpu-total-rows">of 0</span>
+                        </div>
+                    </div>
+
+                    <!-- Throughput -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Throughput</span>
+                        </div>
+                        <div class="metric-value cpu"><span id="cpu-throughput">0.0</span> <span class="unit">GB/s</span></div>
+                        <div id="cpu-chart" class="throughput-chart"></div>
+                    </div>
+
+                    <!-- Timer -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Elapsed Time</span>
+                        </div>
+                        <div class="timer-display cpu" id="cpu-timer">00:00.0</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- GPU Path -->
+            <div class="path-card">
+                <div class="path-header gpu">
+                    <div class="path-title gpu">
+                        <div class="path-icon gpu">🚀</div>
+                        GPU Path
+                    </div>
+                    <div class="path-status" id="gpu-status">Ready</div>
+                </div>
+                <div class="path-metrics">
+                    <!-- Rows Processed -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Rows Processed</span>
+                            <span class="flashblade-badge small">FlashBlade</span>
+                        </div>
+                        <div class="metric-value gpu" id="gpu-rows">0</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill gpu" id="gpu-progress" style="width: 0%"></div>
+                        </div>
+                        <div class="progress-text">
+                            <span id="gpu-progress-pct">0%</span>
+                            <span id="gpu-total-rows">of 0</span>
+                        </div>
+                    </div>
+
+                    <!-- Throughput -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Throughput</span>
+                        </div>
+                        <div class="metric-value gpu"><span id="gpu-throughput">0.0</span> <span class="unit">GB/s</span></div>
+                        <div id="gpu-chart" class="throughput-chart"></div>
+                    </div>
+
+                    <!-- Timer -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Elapsed Time</span>
+                        </div>
+                        <div class="timer-display gpu" id="gpu-timer">00:00.0</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Insight Banner -->
+        <div class="insight-banner" id="insight-banner" style="display: none;">
+            <div>
+                <div class="insight-label">FlashBlade Insight</div>
+                <div class="insight-text" id="insight-text">GPU path demanding higher throughput — FlashBlade delivering without bottleneck</div>
+            </div>
+            <div class="speedup-display">
+                <div class="speedup-label">Current Speedup</div>
+                <div class="speedup-value" id="current-speedup">-</div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Summary View (hidden by default) -->
+    <main class="main-content" id="summary-view" style="display: none;">
+        <div class="summary-header">
+            <h1 class="summary-title">Pipeline <span>Complete</span></h1>
+            <p class="summary-subtitle">Full fraud detection pipeline comparison</p>
+        </div>
+
+        <!-- Hero Speedup -->
+        <div class="speedup-hero">
+            <div class="speedup-hero-label">Overall GPU Acceleration</div>
+            <div class="speedup-hero-value" id="overall-speedup">-</div>
+            <div class="speedup-hero-desc">Faster with GPU + <span>FlashBlade</span> delivering full throughput</div>
+        </div>
+
+        <!-- Totals Row -->
+        <div class="totals-row">
+            <div class="total-card">
+                <div class="total-label">Total Records Processed</div>
+                <div class="total-value neutral" id="total-records">-</div>
+            </div>
+            <div class="total-card">
+                <div class="total-label">CPU Pipeline Time</div>
+                <div class="total-value cpu" id="total-cpu-time">-</div>
+            </div>
+            <div class="total-card">
+                <div class="total-label">GPU Pipeline Time</div>
+                <div class="total-value gpu" id="total-gpu-time">-</div>
+            </div>
+        </div>
+
+        <!-- Stage Breakdown -->
+        <div class="stage-breakdown" id="stage-breakdown">
+            <!-- Populated by JS -->
+        </div>
+
+        <!-- Throughput Comparison -->
+        <div class="throughput-section">
+            <div class="section-title">
+                FlashBlade Throughput by Stage
+                <span class="badge">⚡ Pure Storage</span>
+            </div>
+            <div id="summary-throughput-chart" style="height: 250px;"></div>
+        </div>
+
+        <!-- Key Insight -->
+        <div class="insight-banner final">
+            <div class="insight-icon">💡</div>
+            <div class="insight-content">
+                <h3>Key Takeaway</h3>
+                <p>
+                    GPU acceleration demands <strong>higher storage throughput</strong> than CPU workloads.
+                    Pure Storage FlashBlade delivered sustained high throughput,
+                    ensuring GPUs were never waiting on storage. <strong>Storage is not the bottleneck.</strong>
+                </p>
+            </div>
+        </div>
+    </main>
+
+    <!-- Control Bar -->
+    <div class="control-bar">
+        <button class="btn btn-secondary" id="btn-reset" onclick="resetDemo()">Reset</button>
+        <button class="btn btn-primary" id="btn-start" onclick="startDemo()">Start Demo</button>
+    </div>
+
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
