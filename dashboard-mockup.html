@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pure Storage - Fraud Detection Demo v2</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --pure-orange: #FF6600;
+            --pure-orange-dark: #E55A00;
+            --pure-gray-dark: #1A1A2E;
+            --pure-gray-medium: #2D2D44;
+            --pure-gray-light: #3D3D5C;
+            --text-primary: #FFFFFF;
+            --text-secondary: #B0B0C0;
+            --success-green: #00D4AA;
+            --cpu-blue: #4A90D9;
+            --gpu-green: #00D4AA;
+        }
+
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, var(--pure-gray-dark) 0%, #0F0F1A 100%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Header */
+        .header {
+            background: rgba(26, 26, 46, 0.95);
+            border-bottom: 2px solid var(--pure-orange);
+            padding: 16px 32px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+        }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .pure-logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .pure-logo-icon {
+            width: 40px;
+            height: 40px;
+            background: var(--pure-orange);
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 18px;
+        }
+
+        .pure-logo-text {
+            font-size: 24px;
+            font-weight: 600;
+            letter-spacing: -0.5px;
+        }
+
+        .pure-logo-text span {
+            color: var(--pure-orange);
+        }
+
+        .demo-title {
+            font-size: 14px;
+            color: var(--text-secondary);
+            border-left: 1px solid var(--pure-gray-light);
+            padding-left: 16px;
+            margin-left: 8px;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+        }
+
+        .nvidia-badge {
+            background: #76B900;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        /* Stage Navigation */
+        .stage-nav {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            padding: 24px;
+            background: rgba(45, 45, 68, 0.5);
+        }
+
+        .stage-pill {
+            padding: 10px 24px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+            background: var(--pure-gray-medium);
+            color: var(--text-secondary);
+            border: 1px solid var(--pure-gray-light);
+            transition: all 0.3s ease;
+        }
+
+        .stage-pill.active {
+            background: var(--pure-orange);
+            color: white;
+            border-color: var(--pure-orange);
+            box-shadow: 0 4px 20px rgba(255, 102, 0, 0.4);
+        }
+
+        .stage-pill.completed {
+            background: var(--success-green);
+            color: white;
+            border-color: var(--success-green);
+        }
+
+        .stage-connector {
+            display: flex;
+            align-items: center;
+            color: var(--pure-gray-light);
+        }
+
+        /* Main Content */
+        .main-content {
+            padding: 32px;
+            max-width: 1600px;
+            margin: 0 auto;
+        }
+
+        .stage-header {
+            text-align: center;
+            margin-bottom: 32px;
+        }
+
+        .stage-title {
+            font-size: 36px;
+            font-weight: 300;
+            margin-bottom: 8px;
+        }
+
+        .stage-title span {
+            color: var(--pure-orange);
+            font-weight: 600;
+        }
+
+        .stage-subtitle {
+            color: var(--text-secondary);
+            font-size: 16px;
+        }
+
+        /* Comparison Grid */
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 32px;
+            margin-bottom: 32px;
+        }
+
+        .path-card {
+            background: var(--pure-gray-medium);
+            border-radius: 16px;
+            overflow: hidden;
+            border: 1px solid var(--pure-gray-light);
+        }
+
+        .path-header {
+            padding: 20px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .path-header.cpu {
+            background: linear-gradient(90deg, rgba(74, 144, 217, 0.2) 0%, transparent 100%);
+            border-bottom: 2px solid var(--cpu-blue);
+        }
+
+        .path-header.gpu {
+            background: linear-gradient(90deg, rgba(0, 212, 170, 0.2) 0%, transparent 100%);
+            border-bottom: 2px solid var(--gpu-green);
+        }
+
+        .path-title {
+            font-size: 20px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .path-title.cpu { color: var(--cpu-blue); }
+        .path-title.gpu { color: var(--gpu-green); }
+
+        .path-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+        }
+
+        .path-icon.cpu { background: rgba(74, 144, 217, 0.2); }
+        .path-icon.gpu { background: rgba(0, 212, 170, 0.2); }
+
+        .path-status {
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .path-status.running {
+            background: rgba(255, 102, 0, 0.2);
+            color: var(--pure-orange);
+            animation: pulse 2s infinite;
+        }
+
+        .path-status.completed {
+            background: rgba(0, 212, 170, 0.2);
+            color: var(--success-green);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .path-metrics {
+            padding: 24px;
+            display: grid;
+            gap: 24px;
+        }
+
+        .metric-card {
+            background: var(--pure-gray-dark);
+            border-radius: 12px;
+            padding: 20px;
+        }
+
+        .metric-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .metric-label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .metric-value {
+            font-size: 32px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .metric-value.cpu { color: var(--cpu-blue); }
+        .metric-value.gpu { color: var(--gpu-green); }
+
+        /* Throughput Chart */
+        .throughput-chart {
+            height: 80px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 8px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .chart-bar {
+            position: absolute;
+            bottom: 0;
+            width: 8px;
+            border-radius: 4px 4px 0 0;
+            transition: height 0.3s ease;
+        }
+
+        .chart-bar.cpu { background: var(--cpu-blue); }
+        .chart-bar.gpu { background: var(--gpu-green); }
+
+        /* Progress Bar */
+        .progress-bar {
+            height: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-fill.cpu { background: linear-gradient(90deg, var(--cpu-blue), #6BA3E0); }
+        .progress-fill.gpu { background: linear-gradient(90deg, var(--gpu-green), #33E0C0); }
+
+        /* Timer */
+        .timer-display {
+            font-family: 'SF Mono', 'Consolas', monospace;
+            font-size: 48px;
+            font-weight: 300;
+            letter-spacing: 2px;
+        }
+
+        /* Control Bar */
+        .control-bar {
+            display: flex;
+            justify-content: center;
+            gap: 16px;
+            padding: 32px;
+            background: rgba(26, 26, 46, 0.8);
+            border-top: 1px solid var(--pure-gray-light);
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            backdrop-filter: blur(10px);
+        }
+
+        .btn {
+            padding: 14px 40px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            border: none;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-primary {
+            background: var(--pure-orange);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--pure-orange-dark);
+            box-shadow: 0 4px 20px rgba(255, 102, 0, 0.4);
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--pure-gray-light);
+        }
+
+        .btn-primary:disabled {
+            background: var(--pure-gray-light);
+            cursor: not-allowed;
+        }
+
+        /* FlashBlade Badge */
+        .flashblade-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(255, 102, 0, 0.1);
+            border: 1px solid var(--pure-orange);
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 11px;
+            color: var(--pure-orange);
+        }
+
+        /* Live indicator */
+        .live-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: var(--success-green);
+        }
+
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success-green);
+            border-radius: 50%;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* Summary additions */
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-top: 24px;
+        }
+
+        .summary-card {
+            background: var(--pure-gray-medium);
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .summary-stage {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .summary-speedup {
+            font-size: 28px;
+            font-weight: 600;
+            color: var(--gpu-green);
+        }
+
+        .speedup-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="logo-section">
+            <div class="pure-logo">
+                <div class="pure-logo-icon">P</div>
+                <div class="pure-logo-text">Pure<span>Storage</span></div>
+            </div>
+            <div class="demo-title">AI/ML Fraud Detection Pipeline Demo</div>
+        </div>
+        <div class="header-right">
+            <div class="flashblade-badge">
+                <span>⚡</span> FlashBlade Connected
+            </div>
+            <div class="nvidia-badge">NVIDIA GPU</div>
+            <div class="live-indicator">
+                <div class="live-dot"></div>
+                LIVE
+            </div>
+        </div>
+    </header>
+
+    <!-- Stage Navigation -->
+    <nav class="stage-nav">
+        <div class="stage-pill completed">✓ Ingest</div>
+        <div class="stage-connector">→</div>
+        <div class="stage-pill active">Data Prep</div>
+        <div class="stage-connector">→</div>
+        <div class="stage-pill">Model Train</div>
+        <div class="stage-connector">→</div>
+        <div class="stage-pill">Inference</div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+        <div class="stage-header">
+            <h1 class="stage-title">Stage 2: <span>Data Prep</span></h1>
+            <p class="stage-subtitle">Feature engineering and data transformation</p>
+        </div>
+
+        <div class="comparison-grid">
+            <!-- CPU Path -->
+            <div class="path-card">
+                <div class="path-header cpu">
+                    <div class="path-title cpu">
+                        <div class="path-icon cpu">⚙️</div>
+                        CPU Path
+                    </div>
+                    <div class="path-status running">Running</div>
+                </div>
+                <div class="path-metrics">
+                    <!-- Rows Processed -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Rows Processed</span>
+                            <span class="flashblade-badge">FlashBlade</span>
+                        </div>
+                        <div class="metric-value cpu">2,847,291</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill cpu" style="width: 28%"></div>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
+                            <span>28% complete</span>
+                            <span>of 10,000,000</span>
+                        </div>
+                    </div>
+
+                    <!-- Throughput -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Throughput</span>
+                        </div>
+                        <div class="metric-value cpu">1.2 <span style="font-size: 18px; font-weight: 400;">GB/s</span></div>
+                        <div class="throughput-chart">
+                            <!-- Simulated chart bars -->
+                            <div class="chart-bar cpu" style="left: 5%; height: 40%"></div>
+                            <div class="chart-bar cpu" style="left: 12%; height: 55%"></div>
+                            <div class="chart-bar cpu" style="left: 19%; height: 45%"></div>
+                            <div class="chart-bar cpu" style="left: 26%; height: 60%"></div>
+                            <div class="chart-bar cpu" style="left: 33%; height: 50%"></div>
+                            <div class="chart-bar cpu" style="left: 40%; height: 65%"></div>
+                            <div class="chart-bar cpu" style="left: 47%; height: 55%"></div>
+                            <div class="chart-bar cpu" style="left: 54%; height: 70%"></div>
+                            <div class="chart-bar cpu" style="left: 61%; height: 60%"></div>
+                            <div class="chart-bar cpu" style="left: 68%; height: 75%"></div>
+                            <div class="chart-bar cpu" style="left: 75%; height: 65%"></div>
+                            <div class="chart-bar cpu" style="left: 82%; height: 80%"></div>
+                            <div class="chart-bar cpu" style="left: 89%; height: 70%"></div>
+                        </div>
+                    </div>
+
+                    <!-- Timer -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Elapsed Time</span>
+                        </div>
+                        <div class="timer-display cpu">00:18.4</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- GPU Path -->
+            <div class="path-card">
+                <div class="path-header gpu">
+                    <div class="path-title gpu">
+                        <div class="path-icon gpu">🚀</div>
+                        GPU Path
+                    </div>
+                    <div class="path-status completed">Completed</div>
+                </div>
+                <div class="path-metrics">
+                    <!-- Rows Processed -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Rows Processed</span>
+                            <span class="flashblade-badge">FlashBlade</span>
+                        </div>
+                        <div class="metric-value gpu">10,000,000 ✓</div>
+                        <div class="progress-bar">
+                            <div class="progress-fill gpu" style="width: 100%"></div>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; margin-top: 8px; font-size: 12px; color: var(--text-secondary);">
+                            <span>100% complete</span>
+                            <span>of 10,000,000</span>
+                        </div>
+                    </div>
+
+                    <!-- Throughput -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Throughput</span>
+                        </div>
+                        <div class="metric-value gpu">4.8 <span style="font-size: 18px; font-weight: 400;">GB/s</span></div>
+                        <div class="throughput-chart">
+                            <!-- Simulated chart bars - higher for GPU -->
+                            <div class="chart-bar gpu" style="left: 5%; height: 70%"></div>
+                            <div class="chart-bar gpu" style="left: 12%; height: 85%"></div>
+                            <div class="chart-bar gpu" style="left: 19%; height: 75%"></div>
+                            <div class="chart-bar gpu" style="left: 26%; height: 90%"></div>
+                            <div class="chart-bar gpu" style="left: 33%; height: 80%"></div>
+                            <div class="chart-bar gpu" style="left: 40%; height: 95%"></div>
+                            <div class="chart-bar gpu" style="left: 47%; height: 85%"></div>
+                            <div class="chart-bar gpu" style="left: 54%; height: 92%"></div>
+                            <div class="chart-bar gpu" style="left: 61%; height: 88%"></div>
+                            <div class="chart-bar gpu" style="left: 68%; height: 85%"></div>
+                            <div class="chart-bar gpu" style="left: 75%; height: 80%"></div>
+                            <div class="chart-bar gpu" style="left: 82%; height: 75%"></div>
+                            <div class="chart-bar gpu" style="left: 89%; height: 70%"></div>
+                        </div>
+                    </div>
+
+                    <!-- Timer -->
+                    <div class="metric-card">
+                        <div class="metric-header">
+                            <span class="metric-label">Elapsed Time</span>
+                        </div>
+                        <div class="timer-display gpu">00:10.2</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Insight Banner -->
+        <div style="background: linear-gradient(90deg, rgba(255, 102, 0, 0.1), rgba(0, 212, 170, 0.1)); border: 1px solid var(--pure-gray-light); border-radius: 12px; padding: 20px 32px; display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <div style="font-size: 14px; color: var(--text-secondary); margin-bottom: 4px;">FlashBlade Insight</div>
+                <div style="font-size: 18px;">GPU path demanding <span style="color: var(--pure-orange); font-weight: 600;">4x higher throughput</span> — FlashBlade delivering without bottleneck</div>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 14px; color: var(--text-secondary);">Current Speedup</div>
+                <div style="font-size: 36px; font-weight: 600; color: var(--gpu-green);">1.8x</div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Control Bar -->
+    <div class="control-bar">
+        <button class="btn btn-secondary">← Previous Stage</button>
+        <button class="btn btn-primary" disabled>Continue to Model Train →</button>
+    </div>
+
+    <!-- Add padding at bottom for fixed control bar -->
+    <div style="height: 100px;"></div>
+</body>
+</html>
