@@ -32,7 +32,7 @@ TRITON_URL = os.getenv('TRITON_URL', 'http://triton:8000')
 DATA_DIR = Path(os.getenv('DATA_DIR', '/data/cpu'))
 MODEL_DIR = Path(os.getenv('MODEL_DIR', '/models'))
 WORKER_PORT = int(os.getenv('WORKER_PORT', '5001'))
-WORKER_TYPE = 'cpu'
+WORKER_TYPE = os.getenv('WORKER_TYPE', 'cpu')
 
 # Feature engineering constants
 CATEGORIES = [
@@ -276,6 +276,64 @@ def stage_data_prep() -> Dict[str, Any]:
 # =============================================================================
 # STAGE 3: MODEL TRAIN
 # =============================================================================
+class TrainingProgressCallback(xgb.callback.TrainingCallback):
+    """Custom XGBoost callback to report training progress to dashboard."""
+
+    def __init__(self, tracker: MetricsTracker, total_rounds: int):
+        self.tracker = tracker
+        self.total_rounds = total_rounds
+        self.start_time = time.time()
+        self.last_report_time = 0
+        self.report_interval = 1.0  # Report every 1 second
+
+    def after_iteration(self, model, epoch: int, evals_log: dict) -> bool:
+        """Called after each training iteration."""
+        now = time.time()
+
+        # Report progress periodically (every second)
+        if now - self.last_report_time >= self.report_interval:
+            elapsed = now - self.start_time
+            progress_pct = (epoch + 1) / self.total_rounds * 100
+
+            # Get eval metrics if available
+            train_auc = None
+            eval_auc = None
+            if 'train' in evals_log and 'auc' in evals_log['train']:
+                train_auc = evals_log['train']['auc'][-1]
+            if 'eval' in evals_log and 'auc' in evals_log['eval']:
+                eval_auc = evals_log['eval']['auc'][-1]
+
+            # Estimate time remaining
+            if epoch > 0:
+                time_per_round = elapsed / (epoch + 1)
+                remaining_rounds = self.total_rounds - epoch - 1
+                eta_seconds = time_per_round * remaining_rounds
+            else:
+                eta_seconds = 0
+
+            log(f"  Training: round {epoch + 1}/{self.total_rounds} ({progress_pct:.0f}%) - "
+                f"AUC: {eval_auc:.4f if eval_auc else 'N/A'} - ETA: {eta_seconds:.0f}s")
+
+            # Report metrics to dashboard
+            report_metrics('model_train', {
+                'rows_processed': self.tracker.rows_processed,
+                'total_rows': self.tracker.total_rows,
+                'bytes_processed': self.tracker.bytes_processed,
+                'throughput_gbps': 0,
+                'elapsed_seconds': round(elapsed, 2),
+                'training_round': epoch + 1,
+                'total_rounds': self.total_rounds,
+                'training_progress_pct': round(progress_pct, 1),
+                'train_auc': round(train_auc, 4) if train_auc else None,
+                'eval_auc': round(eval_auc, 4) if eval_auc else None,
+                'eta_seconds': round(eta_seconds, 1)
+            })
+
+            self.last_report_time = now
+
+        return False  # Return False to continue training
+
+
 def stage_model_train() -> Dict[str, Any]:
     """Train XGBoost model using CPU."""
     log("Stage 3: MODEL TRAIN - Training XGBoost (CPU)...")
@@ -323,15 +381,20 @@ def stage_model_train() -> Dict[str, Any]:
     dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_cols)
     dtest = xgb.DMatrix(X_test, label=y_test, feature_names=feature_cols)
 
-    # Train with early stopping
+    # Train with early stopping and progress callback
+    num_rounds = 100
     evals = [(dtrain, 'train'), (dtest, 'eval')]
+    progress_callback = TrainingProgressCallback(tracker, num_rounds)
+
+    log(f"  Starting XGBoost training with {num_rounds} rounds...")
     model = xgb.train(
         params,
         dtrain,
-        num_boost_round=100,
+        num_boost_round=num_rounds,
         evals=evals,
         early_stopping_rounds=10,
-        verbose_eval=False
+        verbose_eval=False,
+        callbacks=[progress_callback]
     )
 
     # Save model for Triton
