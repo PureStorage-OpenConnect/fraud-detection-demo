@@ -193,7 +193,7 @@ def stage_ingest() -> Dict[str, Any]:
 
     metrics = tracker.finalize()
     log(f"  Loaded {metrics['rows_processed']:,} rows in {metrics['elapsed_seconds']:.2f}s "
-        f"({metrics['throughput_gbps']:.2f} GB/s)")
+        f"({metrics['throughput_mbps']:.1f} MB/s)")
 
     return metrics
 
@@ -320,7 +320,7 @@ class TrainingProgressCallback(xgb.callback.TrainingCallback):
                 'rows_processed': self.tracker.rows_processed,
                 'total_rows': self.tracker.total_rows,
                 'bytes_processed': self.tracker.bytes_processed,
-                'throughput_gbps': 0,
+                'throughput_mbps': 0,
                 'elapsed_seconds': round(elapsed, 2),
                 'training_round': epoch + 1,
                 'total_rounds': self.total_rounds,
