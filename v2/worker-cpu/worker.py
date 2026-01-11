@@ -132,26 +132,26 @@ class MetricsTracker:
     def report(self):
         """Send current metrics to dashboard."""
         elapsed = time.time() - self.start_time
-        throughput = self.bytes_processed / elapsed / (1024**3) if elapsed > 0 else 0
+        throughput_mbps = self.bytes_processed / elapsed / (1024**2) if elapsed > 0 else 0
 
         report_metrics(self.stage, {
             'rows_processed': self.rows_processed,
             'total_rows': self.total_rows,
             'bytes_processed': self.bytes_processed,
-            'throughput_gbps': round(throughput, 3),
+            'throughput_mbps': round(throughput_mbps, 1),
             'elapsed_seconds': round(elapsed, 2)
         })
 
     def finalize(self) -> Dict[str, Any]:
         """Return final metrics."""
         elapsed = time.time() - self.start_time
-        throughput = self.bytes_processed / elapsed / (1024**3) if elapsed > 0 else 0
+        throughput_mbps = self.bytes_processed / elapsed / (1024**2) if elapsed > 0 else 0
 
         return {
             'rows_processed': self.rows_processed,
             'total_rows': self.total_rows,
             'bytes_processed': self.bytes_processed,
-            'throughput_gbps': round(throughput, 3),
+            'throughput_mbps': round(throughput_mbps, 1),
             'elapsed_seconds': round(elapsed, 3)
         }
 

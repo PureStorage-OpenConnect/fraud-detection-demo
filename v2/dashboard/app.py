@@ -46,7 +46,8 @@ class WorkerMetrics:
     rows_processed: int = 0
     total_rows: int = 0
     bytes_processed: int = 0
-    throughput_gbps: float = 0.0
+    throughput_mbps: float = 0.0
+    max_throughput_mbps: float = 0.0
     elapsed_seconds: float = 0.0
     is_complete: bool = False
     error: Optional[str] = None
@@ -100,13 +101,17 @@ class DemoState:
             worker_metrics.rows_processed = metrics.get('rows_processed', 0)
             worker_metrics.total_rows = metrics.get('total_rows', 0)
             worker_metrics.bytes_processed = metrics.get('bytes_processed', 0)
-            worker_metrics.throughput_gbps = metrics.get('throughput_gbps', 0.0)
+            worker_metrics.throughput_mbps = metrics.get('throughput_mbps', 0.0)
             worker_metrics.elapsed_seconds = metrics.get('elapsed_seconds', 0.0)
+
+            # Track max throughput
+            if worker_metrics.throughput_mbps > worker_metrics.max_throughput_mbps:
+                worker_metrics.max_throughput_mbps = worker_metrics.throughput_mbps
 
             # Add to history for chart
             worker_metrics.history.append({
                 'time': time.time(),
-                'throughput': metrics.get('throughput_gbps', 0.0)
+                'throughput': metrics.get('throughput_mbps', 0.0)
             })
             # Keep last 100 points
             if len(worker_metrics.history) > 100:
@@ -122,10 +127,14 @@ class DemoState:
             worker_metrics.rows_processed = metrics.get('rows_processed', 0)
             worker_metrics.total_rows = metrics.get('total_rows', 0)
             worker_metrics.bytes_processed = metrics.get('bytes_processed', 0)
-            worker_metrics.throughput_gbps = metrics.get('throughput_gbps', 0.0)
+            worker_metrics.throughput_mbps = metrics.get('throughput_mbps', 0.0)
             worker_metrics.elapsed_seconds = metrics.get('elapsed_seconds', 0.0)
             worker_metrics.is_complete = True
             worker_metrics.error = metrics.get('error')
+
+            # Track max throughput on completion too
+            if worker_metrics.throughput_mbps > worker_metrics.max_throughput_mbps:
+                worker_metrics.max_throughput_mbps = worker_metrics.throughput_mbps
 
             # Check if both workers complete
             if state.cpu.is_complete and state.gpu.is_complete:
@@ -142,7 +151,8 @@ class DemoState:
                         'rows_processed': state.cpu.rows_processed,
                         'total_rows': state.cpu.total_rows,
                         'bytes_processed': state.cpu.bytes_processed,
-                        'throughput_gbps': state.cpu.throughput_gbps,
+                        'throughput_mbps': state.cpu.throughput_mbps,
+                        'max_throughput_mbps': state.cpu.max_throughput_mbps,
                         'elapsed_seconds': state.cpu.elapsed_seconds,
                         'is_complete': state.cpu.is_complete,
                         'error': state.cpu.error,
@@ -152,7 +162,8 @@ class DemoState:
                         'rows_processed': state.gpu.rows_processed,
                         'total_rows': state.gpu.total_rows,
                         'bytes_processed': state.gpu.bytes_processed,
-                        'throughput_gbps': state.gpu.throughput_gbps,
+                        'throughput_mbps': state.gpu.throughput_mbps,
+                        'max_throughput_mbps': state.gpu.max_throughput_mbps,
                         'elapsed_seconds': state.gpu.elapsed_seconds,
                         'is_complete': state.gpu.is_complete,
                         'error': state.gpu.error,
@@ -192,8 +203,8 @@ class DemoState:
                         'cpu_time': cpu_time,
                         'gpu_time': gpu_time,
                         'speedup': round(speedup, 2),
-                        'cpu_throughput': state.cpu.throughput_gbps,
-                        'gpu_throughput': state.gpu.throughput_gbps
+                        'cpu_throughput': state.cpu.max_throughput_mbps,
+                        'gpu_throughput': state.gpu.max_throughput_mbps
                     }
 
                     summary['totals']['cpu_time'] += cpu_time

@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pure Storage - Fraud Detection Demo v2</title>
+    <link rel="icon" type="image/png" href="/static/images/favicon.ico">
     <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
     <link rel="stylesheet" href="/static/css/dashboard.css">
 </head>
@@ -11,10 +12,9 @@
     <!-- Header -->
     <header class="header">
         <div class="logo-section">
-            <div class="pure-logo">
-                <div class="pure-logo-icon">P</div>
-                <div class="pure-logo-text">Pure<span>Storage</span></div>
-            </div>
+            <a href="https://www.purestorage.com" target="_blank" rel="noopener noreferrer">
+                <img src="/static/images/purestorage-logo.jpg" alt="Pure Storage" class="pure-logo-img">
+            </a>
             <div class="demo-title">AI/ML Fraud Detection Pipeline Demo</div>
         </div>
         <div class="header-right">
@@ -42,11 +42,6 @@
 
     <!-- Main Content - Stage View -->
     <main class="main-content" id="stage-view">
-        <div class="stage-header">
-            <h1 class="stage-title" id="stage-title">Ready to Start</h1>
-            <p class="stage-subtitle" id="stage-subtitle">Click Start to begin the fraud detection pipeline</p>
-        </div>
-
         <div class="comparison-grid">
             <!-- CPU Path -->
             <div class="path-card">
@@ -58,37 +53,41 @@
                     <div class="path-status" id="cpu-status">Ready</div>
                 </div>
                 <div class="path-metrics">
-                    <!-- Rows Processed -->
-                    <div class="metric-card">
-                        <div class="metric-header">
-                            <span class="metric-label">Rows Processed</span>
-                            <span class="flashblade-badge small">FlashBlade</span>
-                        </div>
-                        <div class="metric-value cpu" id="cpu-rows">0</div>
-                        <div class="progress-bar">
-                            <div class="progress-fill cpu" id="cpu-progress" style="width: 0%"></div>
-                        </div>
-                        <div class="progress-text">
-                            <span id="cpu-progress-pct">0%</span>
-                            <span id="cpu-total-rows">of 0</span>
-                        </div>
-                    </div>
-
-                    <!-- Throughput -->
-                    <div class="metric-card">
+                    <!-- Throughput - Primary metric, bigger -->
+                    <div class="metric-card throughput-card">
                         <div class="metric-header">
                             <span class="metric-label">Throughput</span>
+                            <span class="flashblade-badge small">FlashBlade</span>
                         </div>
-                        <div class="metric-value cpu"><span id="cpu-throughput">0.0</span> <span class="unit">GB/s</span></div>
+                        <div class="throughput-row">
+                            <div class="throughput-current">
+                                <div class="metric-value-large cpu"><span id="cpu-throughput">0.0</span> <span class="unit">MB/s</span></div>
+                            </div>
+                            <div class="throughput-max">
+                                <div class="max-label">MAX</div>
+                                <div class="max-value cpu" id="cpu-max-throughput">0.0</div>
+                            </div>
+                        </div>
                         <div id="cpu-chart" class="throughput-chart"></div>
                     </div>
 
-                    <!-- Timer -->
-                    <div class="metric-card">
-                        <div class="metric-header">
-                            <span class="metric-label">Elapsed Time</span>
+                    <!-- Rows + Timer side by side -->
+                    <div class="metrics-row">
+                        <div class="metric-card-small">
+                            <div class="metric-label-small">Rows Processed</div>
+                            <div class="metric-value-small cpu" id="cpu-rows">0</div>
+                            <div class="progress-bar-small">
+                                <div class="progress-fill cpu" id="cpu-progress" style="width: 0%"></div>
+                            </div>
+                            <div class="progress-text-small">
+                                <span id="cpu-progress-pct">0%</span>
+                                <span id="cpu-total-rows">of 0</span>
+                            </div>
                         </div>
-                        <div class="timer-display cpu" id="cpu-timer">00:00.0</div>
+                        <div class="metric-card-small">
+                            <div class="metric-label-small">Elapsed Time</div>
+                            <div class="timer-display-small cpu" id="cpu-timer">00:00.0</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -103,37 +102,41 @@
                     <div class="path-status" id="gpu-status">Ready</div>
                 </div>
                 <div class="path-metrics">
-                    <!-- Rows Processed -->
-                    <div class="metric-card">
-                        <div class="metric-header">
-                            <span class="metric-label">Rows Processed</span>
-                            <span class="flashblade-badge small">FlashBlade</span>
-                        </div>
-                        <div class="metric-value gpu" id="gpu-rows">0</div>
-                        <div class="progress-bar">
-                            <div class="progress-fill gpu" id="gpu-progress" style="width: 0%"></div>
-                        </div>
-                        <div class="progress-text">
-                            <span id="gpu-progress-pct">0%</span>
-                            <span id="gpu-total-rows">of 0</span>
-                        </div>
-                    </div>
-
-                    <!-- Throughput -->
-                    <div class="metric-card">
+                    <!-- Throughput - Primary metric, bigger -->
+                    <div class="metric-card throughput-card">
                         <div class="metric-header">
                             <span class="metric-label">Throughput</span>
+                            <span class="flashblade-badge small">FlashBlade</span>
                         </div>
-                        <div class="metric-value gpu"><span id="gpu-throughput">0.0</span> <span class="unit">GB/s</span></div>
+                        <div class="throughput-row">
+                            <div class="throughput-current">
+                                <div class="metric-value-large gpu"><span id="gpu-throughput">0.0</span> <span class="unit">MB/s</span></div>
+                            </div>
+                            <div class="throughput-max">
+                                <div class="max-label">MAX</div>
+                                <div class="max-value gpu" id="gpu-max-throughput">0.0</div>
+                            </div>
+                        </div>
                         <div id="gpu-chart" class="throughput-chart"></div>
                     </div>
 
-                    <!-- Timer -->
-                    <div class="metric-card">
-                        <div class="metric-header">
-                            <span class="metric-label">Elapsed Time</span>
+                    <!-- Rows + Timer side by side -->
+                    <div class="metrics-row">
+                        <div class="metric-card-small">
+                            <div class="metric-label-small">Rows Processed</div>
+                            <div class="metric-value-small gpu" id="gpu-rows">0</div>
+                            <div class="progress-bar-small">
+                                <div class="progress-fill gpu" id="gpu-progress" style="width: 0%"></div>
+                            </div>
+                            <div class="progress-text-small">
+                                <span id="gpu-progress-pct">0%</span>
+                                <span id="gpu-total-rows">of 0</span>
+                            </div>
                         </div>
-                        <div class="timer-display gpu" id="gpu-timer">00:00.0</div>
+                        <div class="metric-card-small">
+                            <div class="metric-label-small">Elapsed Time</div>
+                            <div class="timer-display-small gpu" id="gpu-timer">00:00.0</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -190,7 +193,7 @@
         <!-- Throughput Comparison -->
         <div class="throughput-section">
             <div class="section-title">
-                FlashBlade Throughput by Stage
+                FlashBlade Max Throughput by Stage (MB/s)
                 <span class="badge">⚡ Pure Storage</span>
             </div>
             <div id="summary-throughput-chart" style="height: 250px;"></div>
@@ -214,6 +217,10 @@
     <div class="control-bar">
         <button class="btn btn-secondary" id="btn-reset" onclick="resetDemo()">Reset</button>
         <button class="btn btn-primary" id="btn-start" onclick="startDemo()">Start Demo</button>
+        <div class="stage-info" id="stage-info">
+            <span class="stage-name-display" id="stage-name-display">Ready to Start</span>
+            <span class="stage-desc-display" id="stage-desc-display">Click Start to begin</span>
+        </div>
     </div>
 
     <script src="/static/js/dashboard.js"></script>

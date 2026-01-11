@@ -112,8 +112,11 @@ function updateWorkerMetrics(worker, metrics) {
     document.getElementById(`${prefix}-progress-pct`).textContent = `${pct.toFixed(0)}%`;
     document.getElementById(`${prefix}-total-rows`).textContent = `of ${formatNumber(metrics.total_rows)}`;
 
-    // Throughput
-    document.getElementById(`${prefix}-throughput`).textContent = metrics.throughput_gbps.toFixed(2);
+    // Throughput (now MB/s)
+    document.getElementById(`${prefix}-throughput`).textContent = metrics.throughput_mbps.toFixed(1);
+
+    // Max Throughput
+    document.getElementById(`${prefix}-max-throughput`).textContent = metrics.max_throughput_mbps.toFixed(1);
 
     // Timer
     document.getElementById(`${prefix}-timer`).textContent = formatTime(metrics.elapsed_seconds);
@@ -153,7 +156,7 @@ function updateInsight(cpuMetrics, gpuMetrics) {
         }
 
         // Update insight text based on throughput difference
-        const throughputRatio = gpuMetrics.throughput_gbps / Math.max(cpuMetrics.throughput_gbps, 0.1);
+        const throughputRatio = gpuMetrics.throughput_mbps / Math.max(cpuMetrics.throughput_mbps, 0.1);
         if (throughputRatio > 2) {
             document.getElementById('insight-text').textContent =
                 `GPU demanding ${throughputRatio.toFixed(1)}x higher throughput — FlashBlade delivering without bottleneck`;
@@ -178,10 +181,9 @@ function updateUI(state) {
     if (stageName && state.stages[stageName]) {
         const stageData = state.stages[stageName];
 
-        // Update title
-        document.getElementById('stage-title').innerHTML =
-            `Stage ${state.current_stage_idx + 1}: <span>${STAGE_NAMES[stageName]}</span>`;
-        document.getElementById('stage-subtitle').textContent = STAGE_SUBTITLES[stageName];
+        // Update stage info in control bar
+        document.getElementById('stage-name-display').textContent = STAGE_NAMES[stageName];
+        document.getElementById('stage-desc-display').textContent = STAGE_SUBTITLES[stageName];
 
         // Update worker metrics
         updateWorkerMetrics('cpu', stageData.cpu);
@@ -205,9 +207,8 @@ function updateUI(state) {
         }
     } else if (state.current_stage_idx < 0) {
         // Not started yet
-        document.getElementById('stage-title').textContent = 'Ready to Start';
-        document.getElementById('stage-subtitle').textContent =
-            'Click Start to begin the fraud detection pipeline';
+        document.getElementById('stage-name-display').textContent = 'Ready to Start';
+        document.getElementById('stage-desc-display').textContent = 'Click Start to begin';
         document.getElementById('btn-start').disabled = false;
         document.getElementById('btn-start').textContent = 'Start Demo';
     }
@@ -295,10 +296,15 @@ async function resetDemo() {
             document.getElementById(`${prefix}-progress-pct`).textContent = '0%';
             document.getElementById(`${prefix}-total-rows`).textContent = 'of 0';
             document.getElementById(`${prefix}-throughput`).textContent = '0.0';
+            document.getElementById(`${prefix}-max-throughput`).textContent = '0.0';
             document.getElementById(`${prefix}-timer`).textContent = '00:00.0';
             document.getElementById(`${prefix}-status`).textContent = 'Ready';
             document.getElementById(`${prefix}-status`).className = 'path-status';
         });
+
+        // Reset stage info
+        document.getElementById('stage-name-display').textContent = 'Ready to Start';
+        document.getElementById('stage-desc-display').textContent = 'Click Start to begin';
 
         // Reset charts
         if (cpuChart) cpuChart.updateSeries([{ data: [] }]);
@@ -409,7 +415,7 @@ async function showSummary() {
                 labels: { style: { colors: '#B0B0C0' } }
             },
             yaxis: {
-                title: { text: 'Throughput (GB/s)', style: { color: '#B0B0C0' } },
+                title: { text: 'Throughput (MB/s)', style: { color: '#B0B0C0' } },
                 labels: { style: { colors: '#B0B0C0' } }
             },
             legend: {
