@@ -311,8 +311,9 @@ class TrainingProgressCallback(xgb.callback.TrainingCallback):
             else:
                 eta_seconds = 0
 
+            auc_str = f"{eval_auc:.4f}" if eval_auc else "N/A"
             log(f"  Training: round {epoch + 1}/{self.total_rounds} ({progress_pct:.0f}%) - "
-                f"AUC: {eval_auc:.4f if eval_auc else 'N/A'} - ETA: {eta_seconds:.0f}s")
+                f"AUC: {auc_str} - ETA: {eta_seconds:.0f}s")
 
             # Report metrics to dashboard
             report_metrics('model_train', {
