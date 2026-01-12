@@ -282,6 +282,26 @@ body {
     animation: pulse 2s infinite;
 }
 
+.path-status.running.training {
+    background: rgba(255, 102, 0, 0.3);
+    color: var(--pure-orange);
+    animation: training-pulse 1.5s ease-in-out infinite;
+    box-shadow: 0 0 12px rgba(255, 102, 0, 0.5);
+}
+
+.path-status.running.training::before {
+    content: '';
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--pure-orange);
+    border-top-color: transparent;
+    border-radius: 50%;
+    margin-right: 8px;
+    animation: spin 1s linear infinite;
+    vertical-align: middle;
+}
+
 .path-status.completed {
     background: rgba(0, 212, 170, 0.2);
     color: var(--success-green);
@@ -290,6 +310,22 @@ body {
 @keyframes pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.6; }
+}
+
+@keyframes training-pulse {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 12px rgba(255, 102, 0, 0.5);
+    }
+    50% {
+        opacity: 0.8;
+        box-shadow: 0 0 24px rgba(255, 102, 0, 0.8);
+    }
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
 }
 
 .path-metrics {

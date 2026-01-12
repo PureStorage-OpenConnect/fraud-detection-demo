@@ -276,6 +276,66 @@ def stage_data_prep() -> Dict[str, Any]:
 # =============================================================================
 # STAGE 3: MODEL TRAIN
 # =============================================================================
+class TrainingProgressCallback(xgb.callback.TrainingCallback):
+    """Custom XGBoost callback to report training progress to dashboard."""
+
+    def __init__(self, tracker: MetricsTracker, total_rounds: int):
+        self.tracker = tracker
+        self.total_rounds = total_rounds
+        self.start_time = time.time()
+        self.last_report_time = 0
+        self.report_interval = 1.0  # Report every 1 second
+
+    def after_iteration(self, model, epoch: int, evals_log: dict) -> bool:
+        """Called after each training iteration."""
+        now = time.time()
+
+        # Report progress periodically (every second)
+        if now - self.last_report_time >= self.report_interval:
+            elapsed = now - self.start_time
+            progress_pct = (epoch + 1) / self.total_rounds * 100
+
+            # Get eval metrics if available
+            train_auc = None
+            eval_auc = None
+            if 'train' in evals_log and 'auc' in evals_log['train']:
+                train_auc = evals_log['train']['auc'][-1]
+            if 'eval' in evals_log and 'auc' in evals_log['eval']:
+                eval_auc = evals_log['eval']['auc'][-1]
+
+            # Estimate time remaining
+            if epoch > 0:
+                time_per_round = elapsed / (epoch + 1)
+                remaining_rounds = self.total_rounds - epoch - 1
+                eta_seconds = time_per_round * remaining_rounds
+            else:
+                eta_seconds = 0
+
+            auc_str = f"{eval_auc:.4f}" if eval_auc else "N/A"
+            log(f"  Training: round {epoch + 1}/{self.total_rounds} ({progress_pct:.0f}%) - "
+                f"AUC: {auc_str} - ETA: {eta_seconds:.0f}s")
+
+            # Report metrics to dashboard
+            report_metrics('model_train', {
+                'rows_processed': self.tracker.rows_processed,
+                'total_rows': self.tracker.total_rows,
+                'bytes_processed': self.tracker.bytes_processed,
+                'throughput_mbps': 0,
+                'elapsed_seconds': round(elapsed, 2),
+                'training_round': epoch + 1,
+                'total_rounds': self.total_rounds,
+                'training_progress_pct': round(progress_pct, 1),
+                'train_auc': round(train_auc, 4) if train_auc else None,
+                'eval_auc': round(eval_auc, 4) if eval_auc else None,
+                'eta_seconds': round(eta_seconds, 1),
+                'is_training': True
+            })
+
+            self.last_report_time = now
+
+        return False  # Return False to continue training
+
+
 def stage_model_train() -> Dict[str, Any]:
     """Train XGBoost model using GPU."""
     log("Stage 3: MODEL TRAIN - Training XGBoost (GPU)...")
@@ -325,15 +385,20 @@ def stage_model_train() -> Dict[str, Any]:
     dtrain = xgb.DMatrix(X_train, label=y_train, feature_names=feature_cols)
     dtest = xgb.DMatrix(X_test, label=y_test, feature_names=feature_cols)
 
-    # Train
+    # Train with progress callback
+    num_rounds = 100
     evals = [(dtrain, 'train'), (dtest, 'eval')]
+    progress_callback = TrainingProgressCallback(tracker, num_rounds)
+
+    log(f"  Starting XGBoost training with {num_rounds} rounds...")
     model = xgb.train(
         params,
         dtrain,
-        num_boost_round=100,
+        num_boost_round=num_rounds,
         evals=evals,
         early_stopping_rounds=10,
-        verbose_eval=False
+        verbose_eval=False,
+        callbacks=[progress_callback]
     )
 
     # Save model for Triton
@@ -442,29 +507,47 @@ def stage_inference() -> Dict[str, Any]:
     predictions = np.array(predictions)
     fraud_count = (predictions > 0.5).sum()
 
+    # Finalize scoring metrics
+    score_metrics = tracker.finalize()
+    score_elapsed = score_metrics['elapsed_seconds']
+    score_throughput = score_metrics['throughput_mbps']
+
+    log(f"  Scored {score_metrics['rows_processed']:,} transactions in {score_elapsed:.2f}s "
+        f"({score_throughput:.1f} MB/s)")
+    log(f"  Detected {fraud_count:,} potential fraud cases ({fraud_count / total_rows * 100:.2f}%)")
+
     # Add predictions to dataframe
     df['fraud_score'] = predictions
     df['is_fraud_predicted'] = (predictions > 0.5).astype('int8')
 
-    # Write scored results back to disk (demonstrates write throughput)
+    # Phase 2: Write scored results back to disk
     output_file = DATA_DIR / 'scored_transactions.parquet'
     log(f"  Writing scored results to {output_file}...")
 
-    # Convert cuDF to pandas for writing (or use cuDF write)
+    write_start = time.time()
     df.to_parquet(str(output_file), engine='pyarrow', compression='snappy')
     written_bytes = output_file.stat().st_size
+    write_elapsed = time.time() - write_start
+    write_throughput = written_bytes / write_elapsed / (1024**2) if write_elapsed > 0 else 0
 
-    # Update tracker with write bytes
-    tracker.bytes_processed += written_bytes
+    log(f"  Wrote {written_bytes / (1024**2):.1f} MB in {write_elapsed:.2f}s ({write_throughput:.1f} MB/s)")
 
-    metrics = tracker.finalize()
-    metrics['fraud_detected'] = int(fraud_count)
-    metrics['fraud_rate'] = round(fraud_count / total_rows * 100, 2)
-    metrics['output_file_size_mb'] = round(written_bytes / (1024**2), 1)
+    # Report final metrics with both score and write throughput
+    total_elapsed = score_elapsed + write_elapsed
+    total_bytes = score_metrics['bytes_processed'] + written_bytes
 
-    log(f"  Scored {metrics['rows_processed']:,} transactions in {metrics['elapsed_seconds']:.2f}s")
-    log(f"  Detected {fraud_count:,} potential fraud cases ({metrics['fraud_rate']:.2f}%)")
-    log(f"  Wrote {metrics['output_file_size_mb']:.1f} MB to {output_file}")
+    metrics = {
+        'rows_processed': total_rows,
+        'total_rows': total_rows,
+        'bytes_processed': total_bytes,
+        'throughput_mbps': round(total_bytes / total_elapsed / (1024**2), 1) if total_elapsed > 0 else 0,
+        'elapsed_seconds': round(total_elapsed, 3),
+        'fraud_detected': int(fraud_count),
+        'fraud_rate': round(fraud_count / total_rows * 100, 2),
+        'score_throughput_mbps': round(score_throughput, 1),
+        'write_throughput_mbps': round(write_throughput, 1),
+        'output_file_size_mb': round(written_bytes / (1024**2), 1)
+    }
 
     free_gpu_memory()
 

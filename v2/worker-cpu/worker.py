@@ -327,7 +327,8 @@ class TrainingProgressCallback(xgb.callback.TrainingCallback):
                 'training_progress_pct': round(progress_pct, 1),
                 'train_auc': round(train_auc, 4) if train_auc else None,
                 'eval_auc': round(eval_auc, 4) if eval_auc else None,
-                'eta_seconds': round(eta_seconds, 1)
+                'eta_seconds': round(eta_seconds, 1),
+                'is_training': True
             })
 
             self.last_report_time = now
@@ -506,33 +507,47 @@ def stage_inference() -> Dict[str, Any]:
     # Calculate some stats
     fraud_count = (predictions > 0.5).sum()
 
+    # Finalize scoring metrics
+    score_metrics = tracker.finalize()
+    score_elapsed = score_metrics['elapsed_seconds']
+    score_throughput = score_metrics['throughput_mbps']
+
+    log(f"  Scored {score_metrics['rows_processed']:,} transactions in {score_elapsed:.2f}s "
+        f"({score_throughput:.1f} MB/s)")
+    log(f"  Detected {fraud_count:,} potential fraud cases ({fraud_count / total_rows * 100:.2f}%)")
+
     # Add predictions to dataframe
     df['fraud_score'] = predictions
     df['is_fraud_predicted'] = (predictions > 0.5).astype(np.int8)
 
-    # Write scored results back to disk (demonstrates write throughput)
+    # Phase 2: Write scored results back to disk
     output_file = DATA_DIR / 'scored_transactions.parquet'
     log(f"  Writing scored results to {output_file}...")
 
-    # Write in chunks to show progress
-    chunk_size = 100_000
-    written_bytes = 0
-
-    # For parquet, we write the whole file but track the size
+    write_start = time.time()
     df.to_parquet(output_file, engine='pyarrow', compression='snappy')
     written_bytes = output_file.stat().st_size
+    write_elapsed = time.time() - write_start
+    write_throughput = written_bytes / write_elapsed / (1024**2) if write_elapsed > 0 else 0
 
-    # Update tracker with write bytes
-    tracker.bytes_processed += written_bytes
+    log(f"  Wrote {written_bytes / (1024**2):.1f} MB in {write_elapsed:.2f}s ({write_throughput:.1f} MB/s)")
 
-    metrics = tracker.finalize()
-    metrics['fraud_detected'] = int(fraud_count)
-    metrics['fraud_rate'] = round(fraud_count / total_rows * 100, 2)
-    metrics['output_file_size_mb'] = round(written_bytes / (1024**2), 1)
+    # Report final metrics with both score and write throughput
+    total_elapsed = score_elapsed + write_elapsed
+    total_bytes = score_metrics['bytes_processed'] + written_bytes
 
-    log(f"  Scored {metrics['rows_processed']:,} transactions in {metrics['elapsed_seconds']:.2f}s")
-    log(f"  Detected {fraud_count:,} potential fraud cases ({metrics['fraud_rate']:.2f}%)")
-    log(f"  Wrote {metrics['output_file_size_mb']:.1f} MB to {output_file}")
+    metrics = {
+        'rows_processed': total_rows,
+        'total_rows': total_rows,
+        'bytes_processed': total_bytes,
+        'throughput_mbps': round(total_bytes / total_elapsed / (1024**2), 1) if total_elapsed > 0 else 0,
+        'elapsed_seconds': round(total_elapsed, 3),
+        'fraud_detected': int(fraud_count),
+        'fraud_rate': round(fraud_count / total_rows * 100, 2),
+        'score_throughput_mbps': round(score_throughput, 1),
+        'write_throughput_mbps': round(write_throughput, 1),
+        'output_file_size_mb': round(written_bytes / (1024**2), 1)
+    }
 
     return metrics
 

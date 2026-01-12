@@ -126,9 +126,9 @@ function updateWorkerMetrics(worker, metrics) {
     if (metrics.is_complete) {
         statusEl.textContent = 'Completed';
         statusEl.className = 'path-status completed';
-    } else if (metrics.rows_processed > 0) {
-        statusEl.textContent = 'Running';
-        statusEl.className = 'path-status running';
+    } else if (metrics.rows_processed > 0 || metrics.is_training) {
+        statusEl.textContent = metrics.is_training ? 'Training...' : 'Running';
+        statusEl.className = metrics.is_training ? 'path-status running training' : 'path-status running';
     }
 
     // Update chart
