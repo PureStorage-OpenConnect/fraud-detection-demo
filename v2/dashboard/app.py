@@ -50,6 +50,7 @@ class WorkerMetrics:
     max_throughput_mbps: float = 0.0
     elapsed_seconds: float = 0.0
     is_complete: bool = False
+    is_training: bool = False  # True during model training
     error: Optional[str] = None
     history: list = field(default_factory=list)  # For throughput chart
 
@@ -103,6 +104,7 @@ class DemoState:
             worker_metrics.bytes_processed = metrics.get('bytes_processed', 0)
             worker_metrics.throughput_mbps = metrics.get('throughput_mbps', 0.0)
             worker_metrics.elapsed_seconds = metrics.get('elapsed_seconds', 0.0)
+            worker_metrics.is_training = metrics.get('is_training', False)
 
             # Track max throughput
             if worker_metrics.throughput_mbps > worker_metrics.max_throughput_mbps:
@@ -155,6 +157,7 @@ class DemoState:
                         'max_throughput_mbps': state.cpu.max_throughput_mbps,
                         'elapsed_seconds': state.cpu.elapsed_seconds,
                         'is_complete': state.cpu.is_complete,
+                        'is_training': state.cpu.is_training,
                         'error': state.cpu.error,
                         'history': state.cpu.history[-50:]  # Last 50 points
                     },
@@ -166,6 +169,7 @@ class DemoState:
                         'max_throughput_mbps': state.gpu.max_throughput_mbps,
                         'elapsed_seconds': state.gpu.elapsed_seconds,
                         'is_complete': state.gpu.is_complete,
+                        'is_training': state.gpu.is_training,
                         'error': state.gpu.error,
                         'history': state.gpu.history[-50:]
                     },
