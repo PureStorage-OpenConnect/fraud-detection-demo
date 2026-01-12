@@ -17,7 +17,7 @@ const STAGE_SUBTITLES = {
     'ingest': 'Reading transaction data from FlashBlade',
     'data_prep': 'Feature engineering and data transformation',
     'model_train': 'Training XGBoost fraud detection model',
-    'inference': 'Batch scoring transactions via Triton'
+    'inference': 'Scoring transactions and writing results to FlashBlade'
 };
 
 // State

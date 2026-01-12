@@ -442,12 +442,29 @@ def stage_inference() -> Dict[str, Any]:
     predictions = np.array(predictions)
     fraud_count = (predictions > 0.5).sum()
 
+    # Add predictions to dataframe
+    df['fraud_score'] = predictions
+    df['is_fraud_predicted'] = (predictions > 0.5).astype('int8')
+
+    # Write scored results back to disk (demonstrates write throughput)
+    output_file = DATA_DIR / 'scored_transactions.parquet'
+    log(f"  Writing scored results to {output_file}...")
+
+    # Convert cuDF to pandas for writing (or use cuDF write)
+    df.to_parquet(str(output_file), engine='pyarrow', compression='snappy')
+    written_bytes = output_file.stat().st_size
+
+    # Update tracker with write bytes
+    tracker.bytes_processed += written_bytes
+
     metrics = tracker.finalize()
     metrics['fraud_detected'] = int(fraud_count)
     metrics['fraud_rate'] = round(fraud_count / total_rows * 100, 2)
+    metrics['output_file_size_mb'] = round(written_bytes / (1024**2), 1)
 
     log(f"  Scored {metrics['rows_processed']:,} transactions in {metrics['elapsed_seconds']:.2f}s")
     log(f"  Detected {fraud_count:,} potential fraud cases ({metrics['fraud_rate']:.2f}%)")
+    log(f"  Wrote {metrics['output_file_size_mb']:.1f} MB to {output_file}")
 
     free_gpu_memory()
 
