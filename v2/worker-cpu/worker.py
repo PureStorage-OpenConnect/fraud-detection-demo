@@ -234,7 +234,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def stage_data_prep() -> Dict[str, Any]:
-    """Feature engineering using pandas/numpy, then write to disk."""
+    """Feature engineering using pandas/numpy."""
     log("Stage 2: DATA PREP - Feature engineering with pandas...")
 
     df = stage_data.get('raw_df')
@@ -263,36 +263,12 @@ def stage_data_prep() -> Dict[str, Any]:
     keep_cols = FEATURE_COLUMNS + ['is_fraud']
     df = df[[c for c in keep_cols if c in df.columns]]
 
-    # Free memory from raw data
-    del stage_data['raw_df']
+    # Store for next stage
+    stage_data['features_df'] = df
+    del stage_data['raw_df']  # Free memory
 
-    # Write features to disk for next stages to read
-    output_file = DATA_DIR / 'features.parquet'
-    log(f"  Writing features to {output_file}...")
-
-    write_start = time.time()
-    df.to_parquet(output_file, engine='pyarrow', compression='snappy')
-    written_bytes = output_file.stat().st_size
-    write_elapsed = time.time() - write_start
-    write_throughput = written_bytes / write_elapsed / (1024**2) if write_elapsed > 0 else 0
-
-    log(f"  Wrote {written_bytes / (1024**2):.1f} MB in {write_elapsed:.2f}s ({write_throughput:.1f} MB/s)")
-
-    # Update metrics with write info
-    process_metrics = tracker.finalize()
-    total_elapsed = process_metrics['elapsed_seconds'] + write_elapsed
-
-    metrics = {
-        'rows_processed': total_rows,
-        'total_rows': total_rows,
-        'bytes_processed': written_bytes,
-        'throughput_mbps': round(written_bytes / write_elapsed / (1024**2), 1) if write_elapsed > 0 else 0,
-        'elapsed_seconds': round(total_elapsed, 3),
-        'write_throughput_mbps': round(write_throughput, 1),
-        'output_file_size_mb': round(written_bytes / (1024**2), 1)
-    }
-
-    log(f"  Processed {metrics['rows_processed']:,} rows in {total_elapsed:.2f}s")
+    metrics = tracker.finalize()
+    log(f"  Processed {metrics['rows_processed']:,} rows in {metrics['elapsed_seconds']:.2f}s")
 
     return metrics
 
@@ -361,27 +337,15 @@ class TrainingProgressCallback(xgb.callback.TrainingCallback):
 
 
 def stage_model_train() -> Dict[str, Any]:
-    """Read features from disk, then train XGBoost model using CPU."""
-    log("Stage 3: MODEL TRAIN - Reading features and training XGBoost (CPU)...")
+    """Train XGBoost model using CPU."""
+    log("Stage 3: MODEL TRAIN - Training XGBoost (CPU)...")
 
-    # Read features from disk (written by data_prep stage)
-    input_file = DATA_DIR / 'features.parquet'
-    if not input_file.exists():
-        raise FileNotFoundError(f"Features file not found: {input_file}")
-
-    file_size = input_file.stat().st_size
-    log(f"  Reading features from {input_file} ({file_size / (1024**2):.1f} MB)...")
-
-    read_start = time.time()
-    df = pd.read_parquet(input_file, engine='pyarrow')
-    read_elapsed = time.time() - read_start
-    read_throughput = file_size / read_elapsed / (1024**2) if read_elapsed > 0 else 0
-
-    log(f"  Read {len(df):,} rows in {read_elapsed:.2f}s ({read_throughput:.1f} MB/s)")
+    df = stage_data.get('features_df')
+    if df is None:
+        raise ValueError("No data from data_prep stage")
 
     total_rows = len(df)
     tracker = MetricsTracker('model_train', total_rows)
-    tracker.update(rows=0, bytes_read=file_size)  # Account for the read
 
     # Prepare features and labels
     feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
@@ -484,32 +448,17 @@ instance_group [{{ kind: KIND_CPU, count: 2 }}]
 # STAGE 4: INFERENCE
 # =============================================================================
 def stage_inference() -> Dict[str, Any]:
-    """Read features from disk, batch inference, then write scored results."""
-    log("Stage 4: INFERENCE - Reading features and scoring via Triton (CPU model)...")
+    """Batch inference using Triton (CPU model)."""
+    log("Stage 4: INFERENCE - Batch scoring via Triton (CPU model)...")
 
-    # Read features from disk (written by data_prep stage)
-    input_file = DATA_DIR / 'features.parquet'
-    if not input_file.exists():
-        raise FileNotFoundError(f"Features file not found: {input_file}")
-
-    file_size = input_file.stat().st_size
-    log(f"  Reading features from {input_file} ({file_size / (1024**2):.1f} MB)...")
-
-    read_start = time.time()
-    df = pd.read_parquet(input_file, engine='pyarrow')
-    read_elapsed = time.time() - read_start
-    read_throughput = file_size / read_elapsed / (1024**2) if read_elapsed > 0 else 0
-
-    log(f"  Read {len(df):,} rows in {read_elapsed:.2f}s ({read_throughput:.1f} MB/s)")
-
+    df = stage_data.get('features_df')
     feature_cols = stage_data.get('feature_cols')
-    if feature_cols is None:
-        # Fallback: use all FEATURE_COLUMNS that exist in the dataframe
-        feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
+
+    if df is None or feature_cols is None:
+        raise ValueError("No data/model from previous stages")
 
     total_rows = len(df)
     tracker = MetricsTracker('inference', total_rows)
-    tracker.update(rows=0, bytes_read=file_size)  # Account for the read
 
     # Prepare features
     X = df[feature_cols].values.astype(np.float32)
@@ -583,9 +532,9 @@ def stage_inference() -> Dict[str, Any]:
 
     log(f"  Wrote {written_bytes / (1024**2):.1f} MB in {write_elapsed:.2f}s ({write_throughput:.1f} MB/s)")
 
-    # Report final metrics with read, score, and write throughput
-    total_elapsed = read_elapsed + score_elapsed + write_elapsed
-    total_bytes = file_size + written_bytes  # Read bytes + write bytes
+    # Report final metrics with both score and write throughput
+    total_elapsed = score_elapsed + write_elapsed
+    total_bytes = score_metrics['bytes_processed'] + written_bytes
 
     metrics = {
         'rows_processed': total_rows,
@@ -595,10 +544,8 @@ def stage_inference() -> Dict[str, Any]:
         'elapsed_seconds': round(total_elapsed, 3),
         'fraud_detected': int(fraud_count),
         'fraud_rate': round(fraud_count / total_rows * 100, 2),
-        'read_throughput_mbps': round(read_throughput, 1),
         'score_throughput_mbps': round(score_throughput, 1),
         'write_throughput_mbps': round(write_throughput, 1),
-        'input_file_size_mb': round(file_size / (1024**2), 1),
         'output_file_size_mb': round(written_bytes / (1024**2), 1)
     }
 
