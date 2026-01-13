@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(aws organizations describe-organization:*)",
+      "Bash(aws organizations list-accounts:*)",
+      "Bash(aws organizations create-account:*)",
+      "Bash(aws organizations describe-create-account-status:*)",
+      "Bash(terraform init:*)",
+      "Bash(terraform apply:*)",
+      "Bash(terraform output:*)",
+      "Bash(ssh:*)"
+    ]
+  }
+}
