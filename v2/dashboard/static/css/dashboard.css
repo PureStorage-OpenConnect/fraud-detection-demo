@@ -843,6 +843,131 @@ body {
     color: var(--text-primary);
 }
 
+/* Help Icon and Modal */
+.help-icon {
+    width: 28px;
+    height: 28px;
+    background: rgba(255, 255, 255, 0.1);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.help-icon:hover {
+    background: rgba(255, 102, 0, 0.2);
+    border-color: var(--pure-orange);
+    color: var(--pure-orange);
+}
+
+.help-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(4px);
+}
+
+.help-modal-content {
+    background: var(--pure-gray-dark);
+    border: 1px solid var(--pure-gray-light);
+    border-radius: 12px;
+    max-width: 500px;
+    width: 90%;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.help-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    border-bottom: 1px solid var(--pure-gray-light);
+}
+
+.help-modal-header h2 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.help-close {
+    font-size: 24px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    line-height: 1;
+    transition: color 0.2s ease;
+}
+
+.help-close:hover {
+    color: var(--pure-orange);
+}
+
+.help-modal-body {
+    padding: 24px;
+}
+
+.help-stage {
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.help-stage:last-of-type {
+    border-bottom: none;
+}
+
+.help-stage-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--pure-orange);
+    margin-bottom: 8px;
+}
+
+.help-stage-desc {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.help-stage-desc strong {
+    color: var(--text-primary);
+}
+
+.help-divider {
+    height: 1px;
+    background: var(--pure-orange);
+    margin: 20px 0;
+    opacity: 0.5;
+}
+
+.help-summary {
+    font-size: 12px;
+    color: var(--text-secondary);
+    background: rgba(255, 102, 0, 0.1);
+    padding: 12px;
+    border-radius: 6px;
+    line-height: 1.6;
+}
+
+.help-summary strong {
+    color: var(--pure-orange);
+}
+
 /* Responsive */
 @media (max-width: 1200px) {
     .comparison-grid {

@@ -27,6 +27,20 @@ let cpuChart = null;
 let gpuChart = null;
 let summaryChart = null;
 
+// Help modal toggle
+function toggleHelpModal() {
+    const modal = document.getElementById('help-modal');
+    modal.style.display = modal.style.display === 'none' ? 'flex' : 'none';
+}
+
+// Close modal when clicking outside
+document.addEventListener('click', function(e) {
+    const modal = document.getElementById('help-modal');
+    if (e.target === modal) {
+        modal.style.display = 'none';
+    }
+});
+
 // Format numbers with commas
 function formatNumber(num) {
     return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');

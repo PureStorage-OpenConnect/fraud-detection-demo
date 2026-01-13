@@ -213,8 +213,11 @@ class DemoState:
 
                     summary['totals']['cpu_time'] += cpu_time
                     summary['totals']['gpu_time'] += gpu_time
-                    summary['totals']['cpu_rows'] += state.cpu.rows_processed
-                    summary['totals']['gpu_rows'] += state.gpu.rows_processed
+
+                    # Only count rows from ingest stage (same records processed in all stages)
+                    if name == 'ingest':
+                        summary['totals']['cpu_rows'] = state.cpu.rows_processed
+                        summary['totals']['gpu_rows'] = state.gpu.rows_processed
 
             total_cpu = summary['totals']['cpu_time']
             total_gpu = summary['totals']['gpu_time']

@@ -26,8 +26,55 @@
                 <div class="live-dot"></div>
                 LIVE
             </div>
+            <div class="help-icon" id="help-icon" onclick="toggleHelpModal()">?</div>
         </div>
     </header>
+
+    <!-- Help Modal -->
+    <div class="help-modal" id="help-modal" style="display: none;">
+        <div class="help-modal-content">
+            <div class="help-modal-header">
+                <h2>Pipeline Stages</h2>
+                <span class="help-close" onclick="toggleHelpModal()">&times;</span>
+            </div>
+            <div class="help-modal-body">
+                <div class="help-stage">
+                    <div class="help-stage-name">1. Ingest</div>
+                    <div class="help-stage-desc">
+                        <strong>READ from storage</strong> - Load 2M transaction records from parquet file.
+                        Measures FlashBlade read throughput.
+                    </div>
+                </div>
+                <div class="help-stage">
+                    <div class="help-stage-name">2. Data Prep</div>
+                    <div class="help-stage-desc">
+                        <strong>Feature Engineering + WRITE</strong> - Transform raw data into 21 ML features
+                        (amount stats, time features, geo distance, categorical encoding).
+                        Writes prepared features to storage.
+                    </div>
+                </div>
+                <div class="help-stage">
+                    <div class="help-stage-name">3. Model Train</div>
+                    <div class="help-stage-desc">
+                        <strong>READ + Train XGBoost</strong> - Load features from storage, train gradient boosting
+                        classifier with 100 rounds. GPU uses RAPIDS, CPU uses standard XGBoost.
+                    </div>
+                </div>
+                <div class="help-stage">
+                    <div class="help-stage-name">4. Inference</div>
+                    <div class="help-stage-desc">
+                        <strong>READ + Score + WRITE</strong> - Load features, run fraud predictions on all records,
+                        write scored results back to storage with fraud probability scores.
+                    </div>
+                </div>
+                <div class="help-divider"></div>
+                <div class="help-summary">
+                    <strong>Storage I/O per stage:</strong><br>
+                    Ingest (READ) → Data Prep (WRITE) → Train (READ) → Inference (READ + WRITE)
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Stage Navigation -->
     <nav class="stage-nav">
