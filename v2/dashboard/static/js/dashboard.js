@@ -285,6 +285,9 @@ async function startDemo() {
                 alert(result.error);
                 btn.disabled = false;
             }
+        } else {
+            // Success - immediately poll to get updated state
+            await pollState();
         }
     } catch (e) {
         console.error('Failed to start:', e);
