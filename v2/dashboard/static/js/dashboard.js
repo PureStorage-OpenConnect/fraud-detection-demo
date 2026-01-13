@@ -218,6 +218,10 @@ function updateUI(state) {
             } else {
                 startBtn.textContent = 'Continue →';
             }
+        } else {
+            // Stage in progress but not marked running (edge case)
+            startBtn.disabled = true;
+            startBtn.textContent = 'Processing...';
         }
     } else if (state.current_stage_idx < 0) {
         // Not started yet
