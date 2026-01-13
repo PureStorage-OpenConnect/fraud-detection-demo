@@ -218,10 +218,6 @@ function updateUI(state) {
             } else {
                 startBtn.textContent = 'Continue →';
             }
-        } else {
-            // Stage in progress but not marked running (edge case)
-            startBtn.disabled = true;
-            startBtn.textContent = 'Processing...';
         }
     } else if (state.current_stage_idx < 0) {
         // Not started yet
@@ -285,9 +281,6 @@ async function startDemo() {
                 alert(result.error);
                 btn.disabled = false;
             }
-        } else {
-            // Success - immediately poll to get updated state
-            await pollState();
         }
     } catch (e) {
         console.error('Failed to start:', e);
