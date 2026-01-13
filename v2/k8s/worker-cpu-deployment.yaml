@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-cpu
+  namespace: fraud-demo
+  labels:
+    app: fraud-detection
+    component: worker-cpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fraud-detection
+      component: worker-cpu
+  template:
+    metadata:
+      labels:
+        app: fraud-detection
+        component: worker-cpu
+    spec:
+      # Schedule on CPU-only node
+      nodeSelector:
+        # Uncomment and adjust to target specific node
+        # kubernetes.io/hostname: slc6-lg-n3-b30-25
+        node-type: cpu  # Or use your own label
+      containers:
+        - name: worker-cpu
+          image: ghcr.io/purestorage-openconnect/fraud-detection-demo/worker-cpu:latest
+          # Or use local registry:
+          # image: your-registry.example.com/fraud-demo/worker-cpu:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5001
+              name: http
+          env:
+            - name: WORKER_PORT
+              value: "5001"
+            - name: WORKER_TYPE
+              value: "cpu"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: models
+              mountPath: /models
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5001
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: fraud-data-cpu
+        - name: models
+          persistentVolumeClaim:
+            claimName: fraud-models
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-cpu
+  namespace: fraud-demo
+  labels:
+    app: fraud-detection
+    component: worker-cpu
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5001
+      targetPort: 5001
+      name: http
+  selector:
+    app: fraud-detection
+    component: worker-cpu

@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: fraud-demo
+  labels:
+    app: fraud-detection
+    component: dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fraud-detection
+      component: dashboard
+  template:
+    metadata:
+      labels:
+        app: fraud-detection
+        component: dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: ghcr.io/purestorage-openconnect/fraud-detection-demo/dashboard:latest
+          # Or use local registry:
+          # image: your-registry.example.com/fraud-demo/dashboard:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5000
+              name: http
+          env:
+            - name: CPU_WORKER_URL
+              value: "http://worker-cpu:5001"
+            - name: GPU_WORKER_URL
+              value: "http://worker-gpu:5002"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: fraud-demo
+  labels:
+    app: fraud-detection
+    component: dashboard
+spec:
+  type: NodePort  # Or LoadBalancer if available
+  ports:
+    - port: 8080
+      targetPort: 5000
+      nodePort: 30080  # Access via http://<any-node-ip>:30080
+      name: http
+  selector:
+    app: fraud-detection
+    component: dashboard

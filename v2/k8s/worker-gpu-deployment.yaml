@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-gpu
+  namespace: fraud-demo
+  labels:
+    app: fraud-detection
+    component: worker-gpu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fraud-detection
+      component: worker-gpu
+  template:
+    metadata:
+      labels:
+        app: fraud-detection
+        component: worker-gpu
+    spec:
+      # Schedule on GPU node
+      nodeSelector:
+        # Option 1: Use GPU resource presence (automatic)
+        # nvidia.com/gpu: "true"
+        # Option 2: Use specific node
+        # kubernetes.io/hostname: your-gpu-node
+        node-type: gpu  # Or use your own label
+      tolerations:
+        # Allow scheduling on GPU nodes that may have taints
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: worker-gpu
+          image: ghcr.io/purestorage-openconnect/fraud-detection-demo/worker-gpu:latest
+          # Or use local registry:
+          # image: your-registry.example.com/fraud-demo/worker-gpu:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 5002
+              name: http
+          env:
+            - name: WORKER_PORT
+              value: "5002"
+            - name: WORKER_TYPE
+              value: "gpu"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: models
+              mountPath: /models
+            - name: shm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+              nvidia.com/gpu: "1"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5002
+            initialDelaySeconds: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5002
+            initialDelaySeconds: 60
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: fraud-data-gpu
+        - name: models
+          persistentVolumeClaim:
+            claimName: fraud-models
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-gpu
+  namespace: fraud-demo
+  labels:
+    app: fraud-detection
+    component: worker-gpu
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5002
+      targetPort: 5002
+      name: http
+  selector:
+    app: fraud-detection
+    component: worker-gpu

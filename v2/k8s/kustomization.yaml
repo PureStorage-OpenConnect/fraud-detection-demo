@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: fraud-demo
+
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - pvc.yaml
+  - worker-cpu-deployment.yaml
+  - worker-gpu-deployment.yaml
+  - dashboard-deployment.yaml
+
+# Common labels applied to all resources
+commonLabels:
+  app.kubernetes.io/name: fraud-detection-demo
+  app.kubernetes.io/part-of: fraud-detection
+
+# Image customization (override registry/tags)
+# images:
+#   - name: ghcr.io/purestorage-openconnect/fraud-detection-demo/dashboard
+#     newName: your-registry/fraud-demo/dashboard
+#     newTag: v1.0.0
+#   - name: ghcr.io/purestorage-openconnect/fraud-detection-demo/worker-cpu
+#     newName: your-registry/fraud-demo/worker-cpu
+#     newTag: v1.0.0
+#   - name: ghcr.io/purestorage-openconnect/fraud-detection-demo/worker-gpu
+#     newName: your-registry/fraud-demo/worker-gpu
+#     newTag: v1.0.0

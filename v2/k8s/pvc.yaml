@@ -1,0 +1,42 @@
+---
+# PVC for CPU worker data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fraud-data-cpu
+  namespace: fraud-demo
+spec:
+  accessModes:
+    - ReadWriteMany  # RWX for shared access
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: pure-block  # Uncomment and set to your FlashBlade/FlashArray StorageClass
+---
+# PVC for GPU worker data
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fraud-data-gpu
+  namespace: fraud-demo
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  # storageClassName: pure-block  # Uncomment and set to your FlashBlade/FlashArray StorageClass
+---
+# PVC for models (shared)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fraud-models
+  namespace: fraud-demo
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+  # storageClassName: pure-block
