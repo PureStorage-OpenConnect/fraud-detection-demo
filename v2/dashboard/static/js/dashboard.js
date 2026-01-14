@@ -103,14 +103,22 @@ function updateStageNav(state) {
     const pills = document.querySelectorAll('.stage-pill');
     pills.forEach((pill, idx) => {
         pill.classList.remove('active', 'completed');
-        if (idx < state.current_stage_idx) {
+        const stageName = STAGES[idx];
+        const stageData = state.stages[stageName];
+        const isComplete = stageData && stageData.cpu && stageData.gpu &&
+                          stageData.cpu.is_complete && stageData.gpu.is_complete;
+
+        if (idx < state.current_stage_idx || (idx === state.current_stage_idx && isComplete)) {
+            // Past stages or current stage that's complete
             pill.classList.add('completed');
-            pill.textContent = '✓ ' + STAGE_NAMES[STAGES[idx]];
+            pill.textContent = '✓ ' + STAGE_NAMES[stageName];
         } else if (idx === state.current_stage_idx) {
+            // Current stage still running
             pill.classList.add('active');
-            pill.textContent = STAGE_NAMES[STAGES[idx]];
+            pill.textContent = STAGE_NAMES[stageName];
         } else {
-            pill.textContent = STAGE_NAMES[STAGES[idx]];
+            // Future stages
+            pill.textContent = STAGE_NAMES[stageName];
         }
     });
 }
@@ -134,6 +142,10 @@ function updateWorkerMetrics(worker, metrics) {
 
     // Timer
     document.getElementById(`${prefix}-timer`).textContent = formatTime(metrics.elapsed_seconds);
+
+    // Transactions per second
+    const txnRate = metrics.elapsed_seconds > 0 ? Math.round(metrics.rows_processed / metrics.elapsed_seconds) : 0;
+    document.getElementById(`${prefix}-txn-rate`).textContent = formatNumber(txnRate);
 
     // Status
     const statusEl = document.getElementById(`${prefix}-status`);
@@ -213,24 +225,16 @@ function updateUI(state) {
 
         // Update button state
         const startBtn = document.getElementById('btn-start');
-        console.log('[updateUI] Button logic: is_running=', state.is_running,
-                    'cpu.is_complete=', stageData.cpu.is_complete,
-                    'gpu.is_complete=', stageData.gpu.is_complete);
         if (state.is_running) {
             startBtn.disabled = true;
             startBtn.textContent = 'Running...';
-            console.log('[updateUI] Set button to Running...');
         } else if (stageData.cpu.is_complete && stageData.gpu.is_complete) {
             startBtn.disabled = false;
             if (state.current_stage_idx >= STAGES.length - 1) {
                 startBtn.textContent = 'View Summary';
-                console.log('[updateUI] Set button to View Summary');
             } else {
                 startBtn.textContent = 'Continue →';
-                console.log('[updateUI] Set button to Continue →');
             }
-        } else {
-            console.log('[updateUI] No button change - stage in progress');
         }
     } else if (state.current_stage_idx < 0) {
         // Not started yet
@@ -264,7 +268,6 @@ async function pollState() {
 // Start the demo or continue to next stage
 async function startDemo() {
     const btn = document.getElementById('btn-start');
-    console.log('[startDemo] Called, currentState:', currentState);
 
     // Check if we should show summary
     if (currentState &&
@@ -272,17 +275,14 @@ async function startDemo() {
         currentState.stages.inference &&
         currentState.stages.inference.cpu.is_complete &&
         currentState.stages.inference.gpu.is_complete) {
-        console.log('[startDemo] Showing summary');
         showSummary();
         return;
     }
 
     btn.disabled = true;
     btn.textContent = 'Starting...';
-    console.log('[startDemo] Set button to Starting...');
 
     try {
-        console.log('[startDemo] Calling /api/start...');
         const response = await fetch(`${API_BASE}/api/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -290,21 +290,17 @@ async function startDemo() {
         });
 
         const result = await response.json();
-        console.log('[startDemo] API result:', result);
 
         if (result.error) {
-            console.log('[startDemo] Error in result:', result.error);
             if (result.show_summary) {
                 showSummary();
             } else {
                 alert(result.error);
                 btn.disabled = false;
             }
-        } else {
-            console.log('[startDemo] Success - polling will update button');
         }
     } catch (e) {
-        console.error('[startDemo] Failed:', e);
+        console.error('Failed to start:', e);
         btn.disabled = false;
         btn.textContent = 'Start Demo';
     }

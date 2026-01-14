@@ -463,6 +463,12 @@ body {
 .timer-display-small.cpu { color: var(--cpu-blue); }
 .timer-display-small.gpu { color: var(--gpu-green); }
 
+.txn-rate-small {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
 .progress-bar-small {
     height: 4px;
     background: rgba(0, 0, 0, 0.3);

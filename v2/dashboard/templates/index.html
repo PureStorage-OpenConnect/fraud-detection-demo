@@ -118,10 +118,10 @@
                         <div id="cpu-chart" class="throughput-chart"></div>
                     </div>
 
-                    <!-- Rows + Timer side by side -->
+                    <!-- Transactions + Timer side by side -->
                     <div class="metrics-row">
                         <div class="metric-card-small">
-                            <div class="metric-label-small">Rows Processed</div>
+                            <div class="metric-label-small">Transactions Processed</div>
                             <div class="metric-value-small cpu" id="cpu-rows">0</div>
                             <div class="progress-bar-small">
                                 <div class="progress-fill cpu" id="cpu-progress" style="width: 0%"></div>
@@ -134,6 +134,7 @@
                         <div class="metric-card-small">
                             <div class="metric-label-small">Elapsed Time</div>
                             <div class="timer-display-small cpu" id="cpu-timer">00:00.0</div>
+                            <div class="txn-rate-small"><span id="cpu-txn-rate">0</span> txn/sec</div>
                         </div>
                     </div>
                 </div>
@@ -167,10 +168,10 @@
                         <div id="gpu-chart" class="throughput-chart"></div>
                     </div>
 
-                    <!-- Rows + Timer side by side -->
+                    <!-- Transactions + Timer side by side -->
                     <div class="metrics-row">
                         <div class="metric-card-small">
-                            <div class="metric-label-small">Rows Processed</div>
+                            <div class="metric-label-small">Transactions Processed</div>
                             <div class="metric-value-small gpu" id="gpu-rows">0</div>
                             <div class="progress-bar-small">
                                 <div class="progress-fill gpu" id="gpu-progress" style="width: 0%"></div>
@@ -183,6 +184,7 @@
                         <div class="metric-card-small">
                             <div class="metric-label-small">Elapsed Time</div>
                             <div class="timer-display-small gpu" id="gpu-timer">00:00.0</div>
+                            <div class="txn-rate-small"><span id="gpu-txn-rate">0</span> txn/sec</div>
                         </div>
                     </div>
                 </div>
@@ -261,7 +263,7 @@
 
     <!-- Version Footer -->
     <div style="position: fixed; bottom: 5px; right: 10px; font-size: 10px; color: #666; opacity: 0.7;">
-        v2.0.7-fix
+        v2.0.8
     </div>
 
     <script src="/static/js/dashboard.js"></script>
