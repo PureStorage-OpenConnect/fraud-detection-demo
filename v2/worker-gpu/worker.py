@@ -262,12 +262,28 @@ def stage_data_prep() -> Dict[str, Any]:
     keep_cols = [c for c in FEATURE_COLUMNS + ['is_fraud'] if c in df.columns]
     df = df[keep_cols]
 
-    # Store for next stage
-    stage_data['features_df'] = df
+    # Write features to storage (FlashBlade I/O)
+    output_file = DATA_DIR / 'features.parquet'
+    log(f"  Writing features to {output_file}...")
+
+    write_start = time.time()
+    df.to_parquet(str(output_file), engine='pyarrow', compression='snappy')
+    written_bytes = output_file.stat().st_size
+    write_elapsed = time.time() - write_start
+    write_throughput = written_bytes / write_elapsed / (1024**2) if write_elapsed > 0 else 0
+
+    log(f"  Wrote {written_bytes / (1024**2):.1f} MB in {write_elapsed:.2f}s ({write_throughput:.1f} MB/s)")
+
+    # Update tracker with write bytes
+    tracker.bytes_processed += written_bytes
+
+    # Clear memory - next stage will read from disk
     del stage_data['raw_df']
     free_gpu_memory()
 
     metrics = tracker.finalize()
+    metrics['write_throughput_mbps'] = round(write_throughput, 1)
+    metrics['output_file_size_mb'] = round(written_bytes / (1024**2), 1)
     log(f"  Processed {metrics['rows_processed']:,} rows in {metrics['elapsed_seconds']:.2f}s")
 
     return metrics
@@ -337,15 +353,33 @@ class TrainingProgressCallback(xgb.callback.TrainingCallback):
 
 
 def stage_model_train() -> Dict[str, Any]:
-    """Train XGBoost model using GPU."""
-    log("Stage 3: MODEL TRAIN - Training XGBoost (GPU)...")
+    """Read features from storage, then train XGBoost model using GPU."""
+    log("Stage 3: MODEL TRAIN - Reading features and training XGBoost (GPU)...")
 
-    df = stage_data.get('features_df')
-    if df is None:
-        raise ValueError("No data from data_prep stage")
+    # Read features from storage (FlashBlade I/O)
+    input_file = DATA_DIR / 'features.parquet'
+    if not input_file.exists():
+        raise FileNotFoundError(f"Features file not found: {input_file}")
 
-    total_rows = len(df)
+    file_size = input_file.stat().st_size
+    log(f"  Reading features from {input_file} ({file_size / (1024**2):.1f} MB)...")
+
+    # Get row count first
+    import pyarrow.parquet as pq
+    parquet_file = pq.ParquetFile(input_file)
+    total_rows = parquet_file.metadata.num_rows
+
     tracker = MetricsTracker('model_train', total_rows)
+
+    # Read the features file into cuDF
+    read_start = time.time()
+    df = cudf.read_parquet(str(input_file))
+    read_elapsed = time.time() - read_start
+    read_throughput = file_size / read_elapsed / (1024**2) if read_elapsed > 0 else 0
+
+    log(f"  Read {total_rows:,} rows in {read_elapsed:.2f}s ({read_throughput:.1f} MB/s)")
+
+    tracker.update(rows=total_rows, bytes_read=file_size)
 
     # Prepare features and labels
     feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
@@ -354,6 +388,10 @@ def stage_model_train() -> Dict[str, Any]:
     X = df[feature_cols].to_cupy().get().astype(np.float32)
     y = df['is_fraud'].to_cupy().get().astype(np.int32)
 
+    # Store for inference stage
+    stage_data['features_df'] = df
+    stage_data['feature_cols'] = feature_cols
+
     # Handle NaN
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -361,8 +399,6 @@ def stage_model_train() -> Dict[str, Any]:
     split_idx = int(len(X) * 0.8)
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
-
-    tracker.update(rows=total_rows, bytes_read=X.nbytes)
 
     # Class imbalance
     n_pos = y_train.sum()
@@ -386,7 +422,7 @@ def stage_model_train() -> Dict[str, Any]:
     dtest = xgb.DMatrix(X_test, label=y_test, feature_names=feature_cols)
 
     # Train with progress callback
-    num_rounds = 100
+    num_rounds = 20  # Reduced for demo (was 100)
     evals = [(dtrain, 'train'), (dtest, 'eval')]
     progress_callback = TrainingProgressCallback(tracker, num_rounds)
 
@@ -451,19 +487,41 @@ instance_group [{{ kind: KIND_GPU, count: 1 }}]
 # STAGE 4: INFERENCE
 # =============================================================================
 def stage_inference() -> Dict[str, Any]:
-    """Batch inference using Triton (GPU model)."""
-    log("Stage 4: INFERENCE - Batch scoring via Triton (GPU model)...")
+    """Read features from storage, score, and write results."""
+    log("Stage 4: INFERENCE - Reading features, scoring, and writing results...")
 
-    df = stage_data.get('features_df')
+    # Read features from storage (FlashBlade I/O)
+    input_file = DATA_DIR / 'features.parquet'
+    if not input_file.exists():
+        raise FileNotFoundError(f"Features file not found: {input_file}")
+
+    file_size = input_file.stat().st_size
+    log(f"  Reading features from {input_file} ({file_size / (1024**2):.1f} MB)...")
+
+    # Get row count first
+    import pyarrow.parquet as pq
+    parquet_file = pq.ParquetFile(input_file)
+    total_rows = parquet_file.metadata.num_rows
+
+    # Stage 4 does READ + WRITE, so total is 2x rows
+    tracker = MetricsTracker('inference', total_rows * 2)
+
+    # Read the features file
+    read_start = time.time()
+    df = cudf.read_parquet(str(input_file))
+    read_elapsed = time.time() - read_start
+    read_throughput = file_size / read_elapsed / (1024**2) if read_elapsed > 0 else 0
+
+    log(f"  Read {total_rows:,} rows in {read_elapsed:.2f}s ({read_throughput:.1f} MB/s)")
+
+    # Note: Don't update tracker here - let batch loop show progressive counting
+
+    # Get feature columns and model from previous stage
     feature_cols = stage_data.get('feature_cols')
+    if feature_cols is None:
+        feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
 
-    if df is None or feature_cols is None:
-        raise ValueError("No data/model from previous stages")
-
-    total_rows = len(df)
-    tracker = MetricsTracker('inference', total_rows)
-
-    # Prepare features (convert from GPU to CPU for Triton HTTP)
+    # Prepare features (convert from GPU to CPU for inference)
     X = df[feature_cols].to_cupy().get().astype(np.float32)
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -502,9 +560,12 @@ def stage_inference() -> Dict[str, Any]:
                 preds = np.zeros(len(batch))
 
         predictions.extend(preds)
+        # Update tracker with batch progress for visual feedback
         tracker.update(rows=len(batch), bytes_read=batch.nbytes)
 
     predictions = np.array(predictions)
+
+    # Calculate some stats
     fraud_count = (predictions > 0.5).sum()
 
     # Finalize scoring metrics
@@ -532,13 +593,16 @@ def stage_inference() -> Dict[str, Any]:
 
     log(f"  Wrote {written_bytes / (1024**2):.1f} MB in {write_elapsed:.2f}s ({write_throughput:.1f} MB/s)")
 
+    # Update tracker with write rows
+    tracker.update(rows=total_rows, bytes_read=written_bytes)
+
     # Report final metrics with both score and write throughput
     total_elapsed = score_elapsed + write_elapsed
     total_bytes = score_metrics['bytes_processed'] + written_bytes
 
     metrics = {
-        'rows_processed': total_rows,
-        'total_rows': total_rows,
+        'rows_processed': total_rows * 2,  # READ + WRITE
+        'total_rows': total_rows * 2,
         'bytes_processed': total_bytes,
         'throughput_mbps': round(total_bytes / total_elapsed / (1024**2), 1) if total_elapsed > 0 else 0,
         'elapsed_seconds': round(total_elapsed, 3),
