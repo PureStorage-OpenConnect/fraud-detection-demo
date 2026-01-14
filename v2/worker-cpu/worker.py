@@ -234,7 +234,7 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def stage_data_prep() -> Dict[str, Any]:
-    """Feature engineering using pandas/numpy."""
+    """Feature engineering using pandas/numpy, then write to storage."""
     log("Stage 2: DATA PREP - Feature engineering with pandas...")
 
     df = stage_data.get('raw_df')
@@ -263,11 +263,27 @@ def stage_data_prep() -> Dict[str, Any]:
     keep_cols = FEATURE_COLUMNS + ['is_fraud']
     df = df[[c for c in keep_cols if c in df.columns]]
 
-    # Store for next stage
-    stage_data['features_df'] = df
-    del stage_data['raw_df']  # Free memory
+    # Write features to storage (FlashBlade I/O)
+    output_file = DATA_DIR / 'features.parquet'
+    log(f"  Writing features to {output_file}...")
+
+    write_start = time.time()
+    df.to_parquet(output_file, engine='pyarrow', compression='snappy')
+    written_bytes = output_file.stat().st_size
+    write_elapsed = time.time() - write_start
+    write_throughput = written_bytes / write_elapsed / (1024**2) if write_elapsed > 0 else 0
+
+    log(f"  Wrote {written_bytes / (1024**2):.1f} MB in {write_elapsed:.2f}s ({write_throughput:.1f} MB/s)")
+
+    # Update tracker with write bytes
+    tracker.bytes_processed += written_bytes
+
+    # Clear memory - next stage will read from disk
+    del stage_data['raw_df']
 
     metrics = tracker.finalize()
+    metrics['write_throughput_mbps'] = round(write_throughput, 1)
+    metrics['output_file_size_mb'] = round(written_bytes / (1024**2), 1)
     log(f"  Processed {metrics['rows_processed']:,} rows in {metrics['elapsed_seconds']:.2f}s")
 
     return metrics
@@ -337,20 +353,42 @@ class TrainingProgressCallback(xgb.callback.TrainingCallback):
 
 
 def stage_model_train() -> Dict[str, Any]:
-    """Train XGBoost model using CPU."""
-    log("Stage 3: MODEL TRAIN - Training XGBoost (CPU)...")
+    """Read features from storage, then train XGBoost model using CPU."""
+    log("Stage 3: MODEL TRAIN - Reading features and training XGBoost (CPU)...")
 
-    df = stage_data.get('features_df')
-    if df is None:
-        raise ValueError("No data from data_prep stage")
+    # Read features from storage (FlashBlade I/O)
+    input_file = DATA_DIR / 'features.parquet'
+    if not input_file.exists():
+        raise FileNotFoundError(f"Features file not found: {input_file}")
 
-    total_rows = len(df)
+    file_size = input_file.stat().st_size
+    log(f"  Reading features from {input_file} ({file_size / (1024**2):.1f} MB)...")
+
+    # Get row count first
+    import pyarrow.parquet as pq
+    parquet_file = pq.ParquetFile(input_file)
+    total_rows = parquet_file.metadata.num_rows
+
     tracker = MetricsTracker('model_train', total_rows)
+
+    # Read the features file
+    read_start = time.time()
+    df = pd.read_parquet(input_file, engine='pyarrow')
+    read_elapsed = time.time() - read_start
+    read_throughput = file_size / read_elapsed / (1024**2) if read_elapsed > 0 else 0
+
+    log(f"  Read {total_rows:,} rows in {read_elapsed:.2f}s ({read_throughput:.1f} MB/s)")
+
+    tracker.update(rows=total_rows, bytes_read=file_size)
 
     # Prepare features and labels
     feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
     X = df[feature_cols].values.astype(np.float32)
     y = df['is_fraud'].values.astype(np.int32)
+
+    # Store for inference stage
+    stage_data['features_df'] = df
+    stage_data['feature_cols'] = feature_cols
 
     # Handle any NaN values
     X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
@@ -359,8 +397,6 @@ def stage_model_train() -> Dict[str, Any]:
     split_idx = int(len(X) * 0.8)
     X_train, X_test = X[:split_idx], X[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
-
-    tracker.update(rows=total_rows, bytes_read=X.nbytes)
 
     # Calculate class imbalance
     n_pos = y_train.sum()
@@ -448,17 +484,38 @@ instance_group [{{ kind: KIND_CPU, count: 2 }}]
 # STAGE 4: INFERENCE
 # =============================================================================
 def stage_inference() -> Dict[str, Any]:
-    """Batch inference using Triton (CPU model)."""
-    log("Stage 4: INFERENCE - Batch scoring via Triton (CPU model)...")
+    """Read features from storage, score, and write results."""
+    log("Stage 4: INFERENCE - Reading features, scoring, and writing results...")
 
-    df = stage_data.get('features_df')
-    feature_cols = stage_data.get('feature_cols')
+    # Read features from storage (FlashBlade I/O)
+    input_file = DATA_DIR / 'features.parquet'
+    if not input_file.exists():
+        raise FileNotFoundError(f"Features file not found: {input_file}")
 
-    if df is None or feature_cols is None:
-        raise ValueError("No data/model from previous stages")
+    file_size = input_file.stat().st_size
+    log(f"  Reading features from {input_file} ({file_size / (1024**2):.1f} MB)...")
 
-    total_rows = len(df)
+    # Get row count first
+    import pyarrow.parquet as pq
+    parquet_file = pq.ParquetFile(input_file)
+    total_rows = parquet_file.metadata.num_rows
+
     tracker = MetricsTracker('inference', total_rows)
+
+    # Read the features file
+    read_start = time.time()
+    df = pd.read_parquet(input_file, engine='pyarrow')
+    read_elapsed = time.time() - read_start
+    read_throughput = file_size / read_elapsed / (1024**2) if read_elapsed > 0 else 0
+
+    log(f"  Read {total_rows:,} rows in {read_elapsed:.2f}s ({read_throughput:.1f} MB/s)")
+
+    tracker.update(rows=total_rows, bytes_read=file_size)
+
+    # Get feature columns and model from previous stage
+    feature_cols = stage_data.get('feature_cols')
+    if feature_cols is None:
+        feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
 
     # Prepare features
     X = df[feature_cols].values.astype(np.float32)
