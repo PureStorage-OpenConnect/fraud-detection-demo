@@ -81,7 +81,7 @@ body {
 }
 
 .demo-title {
-    font-size: 14px;
+    font-size: 20px;
     color: var(--text-secondary);
     border-left: 1px solid var(--pure-gray-light);
     padding-left: 16px;
