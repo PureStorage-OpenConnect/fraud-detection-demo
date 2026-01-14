@@ -156,6 +156,7 @@ function updateWorkerMetrics(worker, metrics) {
 // Update insight banner
 function updateInsight(cpuMetrics, gpuMetrics) {
     const banner = document.getElementById('insight-banner');
+    if (!banner) return; // Element doesn't exist, skip
 
     if (cpuMetrics.rows_processed > 0 || gpuMetrics.rows_processed > 0) {
         banner.style.display = 'flex';
@@ -166,14 +167,18 @@ function updateInsight(cpuMetrics, gpuMetrics) {
             const gpuRate = gpuMetrics.rows_processed / gpuMetrics.elapsed_seconds;
             const speedup = gpuRate / Math.max(cpuRate, 1);
 
-            document.getElementById('current-speedup').textContent = `${speedup.toFixed(1)}x`;
+            const speedupEl = document.getElementById('current-speedup');
+            if (speedupEl) speedupEl.textContent = `${speedup.toFixed(1)}x`;
         }
 
         // Update insight text based on throughput difference
         const throughputRatio = gpuMetrics.throughput_mbps / Math.max(cpuMetrics.throughput_mbps, 0.1);
         if (throughputRatio > 2) {
-            document.getElementById('insight-text').textContent =
-                `GPU demanding ${throughputRatio.toFixed(1)}x higher throughput — FlashBlade delivering without bottleneck`;
+            const insightEl = document.getElementById('insight-text');
+            if (insightEl) {
+                insightEl.textContent =
+                    `GPU demanding ${throughputRatio.toFixed(1)}x higher throughput — FlashBlade delivering without bottleneck`;
+            }
         }
     } else {
         banner.style.display = 'none';
