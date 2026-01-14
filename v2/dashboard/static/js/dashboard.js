@@ -214,6 +214,11 @@ function updateUI(state) {
     if (stageName && state.stages[stageName]) {
         const stageData = state.stages[stageName];
 
+        // Hide setup overlay once data starts flowing
+        if (stageData.cpu.rows_processed > 0 || stageData.gpu.rows_processed > 0) {
+            showSetupOverlay(false);
+        }
+
         // Update stage info in control bar
         document.getElementById('stage-name-display').textContent = STAGE_NAMES[stageName];
         document.getElementById('stage-desc-display').textContent = STAGE_SUBTITLES[stageName];
@@ -267,6 +272,14 @@ async function pollState() {
     }
 }
 
+// Show/hide setup overlay
+function showSetupOverlay(show) {
+    const overlay = document.getElementById('setup-overlay');
+    if (overlay) {
+        overlay.style.display = show ? 'flex' : 'none';
+    }
+}
+
 // Start the demo or continue to next stage
 async function startDemo() {
     const btn = document.getElementById('btn-start');
@@ -284,6 +297,9 @@ async function startDemo() {
     btn.disabled = true;
     btn.textContent = 'Starting...';
 
+    // Show setup overlay
+    showSetupOverlay(true);
+
     try {
         const response = await fetch(`${API_BASE}/api/start`, {
             method: 'POST',
@@ -294,6 +310,7 @@ async function startDemo() {
         const result = await response.json();
 
         if (result.error) {
+            showSetupOverlay(false);
             if (result.show_summary) {
                 showSummary();
             } else {
@@ -303,6 +320,7 @@ async function startDemo() {
         }
     } catch (e) {
         console.error('Failed to start:', e);
+        showSetupOverlay(false);
         btn.disabled = false;
         btn.textContent = 'Start Demo';
     }
