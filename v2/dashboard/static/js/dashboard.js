@@ -14,10 +14,10 @@ const STAGE_NAMES = {
     'inference': 'Inference'
 };
 const STAGE_SUBTITLES = {
-    'ingest': 'Reading transaction data from FlashBlade',
-    'data_prep': 'Feature engineering and data transformation',
-    'model_train': 'Training XGBoost fraud detection model',
-    'inference': 'Scoring transactions and writing results to FlashBlade'
+    'ingest': 'Reading transaction data from persistent store',
+    'data_prep': 'Feature engineering, data transformation, and write to persistent store',
+    'model_train': 'Read from persistent store and training XGBoost fraud detection model',
+    'inference': 'Scoring transactions and writing results to persistent store'
 };
 
 // State
