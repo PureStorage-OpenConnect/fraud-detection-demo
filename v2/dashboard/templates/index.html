@@ -41,36 +41,38 @@
                 <div class="help-stage">
                     <div class="help-stage-name">1. Ingest</div>
                     <div class="help-stage-desc">
-                        <strong>READ from storage</strong> - Load 2M transaction records from parquet file.
-                        Measures FlashBlade read throughput.
+                        <strong>Read from FlashBlade</strong> - Load transaction records from parquet file.
+                        Demonstrates read throughput from high-performance storage.
                     </div>
                 </div>
                 <div class="help-stage">
                     <div class="help-stage-name">2. Data Prep</div>
                     <div class="help-stage-desc">
-                        <strong>Feature Engineering + WRITE</strong> - Transform raw data into 21 ML features
-                        (amount stats, time features, geo distance, categorical encoding).
-                        Writes prepared features to storage.
+                        <strong>Feature Engineering + Write to FlashBlade</strong> - Transform raw data into 21 ML features
+                        including amount statistics, time-based features, geographic distance,
+                        and categorical encoding. Write prepared features to storage.
                     </div>
                 </div>
                 <div class="help-stage">
                     <div class="help-stage-name">3. Model Train</div>
                     <div class="help-stage-desc">
-                        <strong>READ + Train XGBoost</strong> - Load features from storage, train gradient boosting
-                        classifier with 100 rounds. GPU uses RAPIDS, CPU uses standard XGBoost.
+                        <strong>Read + XGBoost Training</strong> - Read transaction features from FlashBlade,
+                        then train XGBoost gradient boosting classifier with 100 rounds.
+                        Both paths use XGBoost - CPU path vs GPU-accelerated path.
                     </div>
                 </div>
                 <div class="help-stage">
                     <div class="help-stage-name">4. Inference</div>
                     <div class="help-stage-desc">
-                        <strong>READ + Score + WRITE</strong> - Load features, run fraud predictions on all records,
-                        write scored results back to storage with fraud probability scores.
+                        <strong>Score + Write to FlashBlade</strong> - Run fraud predictions on all records
+                        and write scored results with fraud probability scores back to storage.
                     </div>
                 </div>
                 <div class="help-divider"></div>
                 <div class="help-summary">
-                    <strong>Storage I/O per stage:</strong><br>
-                    Ingest (READ) → Data Prep (WRITE) → Train (READ) → Inference (READ + WRITE)
+                    <strong>Demo Purpose:</strong> Compare CPU vs GPU performance across a complete
+                    ML fraud detection pipeline, showcasing how high-throughput storage like FlashBlade
+                    can keep pace with GPU-accelerated workloads.
                 </div>
             </div>
         </div>

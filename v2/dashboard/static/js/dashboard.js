@@ -143,9 +143,11 @@ function updateWorkerMetrics(worker, metrics) {
     // Timer
     document.getElementById(`${prefix}-timer`).textContent = formatTime(metrics.elapsed_seconds);
 
-    // Transactions per second
-    const txnRate = metrics.elapsed_seconds > 0 ? Math.round(metrics.rows_processed / metrics.elapsed_seconds) : 0;
-    document.getElementById(`${prefix}-txn-rate`).textContent = formatNumber(txnRate);
+    // Transactions per second (skip during training - it's doing boosting rounds, not transactions)
+    if (!metrics.is_training) {
+        const txnRate = metrics.elapsed_seconds > 0 ? Math.round(metrics.rows_processed / metrics.elapsed_seconds) : 0;
+        document.getElementById(`${prefix}-txn-rate`).textContent = formatNumber(txnRate);
+    }
 
     // Status
     const statusEl = document.getElementById(`${prefix}-status`);
