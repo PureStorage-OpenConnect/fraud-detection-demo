@@ -420,7 +420,7 @@ def stage_model_train() -> Dict[str, Any]:
     dtest = xgb.DMatrix(X_test, label=y_test, feature_names=feature_cols)
 
     # Train with early stopping and progress callback
-    num_rounds = 100
+    num_rounds = 20  # Reduced for demo (was 100)
     evals = [(dtrain, 'train'), (dtest, 'eval')]
     progress_callback = TrainingProgressCallback(tracker, num_rounds)
 
@@ -511,7 +511,7 @@ def stage_inference() -> Dict[str, Any]:
 
     log(f"  Read {total_rows:,} rows in {read_elapsed:.2f}s ({read_throughput:.1f} MB/s)")
 
-    tracker.update(rows=total_rows, bytes_read=file_size)
+    # Note: Don't update tracker here - let batch loop show progressive counting
 
     # Get feature columns and model from previous stage
     feature_cols = stage_data.get('feature_cols')
@@ -558,6 +558,8 @@ def stage_inference() -> Dict[str, Any]:
                 preds = np.zeros(len(batch))
 
         predictions.extend(preds)
+        # Update tracker with batch progress for visual feedback
+        tracker.update(rows=len(batch), bytes_read=batch.nbytes)
 
     predictions = np.array(predictions)
 
