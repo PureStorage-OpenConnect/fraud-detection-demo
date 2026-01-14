@@ -463,10 +463,10 @@ body {
 .max-value.cpu { color: var(--cpu-blue); }
 .max-value.gpu { color: var(--gpu-green); }
 
-/* Small metrics row (side by side) */
+/* Small metrics row (3 widgets side by side) */
 .metrics-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 40% 30% 30%;
     gap: 12px;
 }
 
@@ -504,6 +504,21 @@ body {
 .timer-display-small.gpu { color: var(--gpu-green); }
 
 .txn-rate-small {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+}
+
+/* Txn/sec widget styles */
+.txn-rate-value {
+    font-size: 24px;
+    font-weight: 600;
+}
+
+.txn-rate-value.cpu { color: var(--cpu-blue); }
+.txn-rate-value.gpu { color: var(--gpu-green); }
+
+.txn-rate-unit {
     font-size: 12px;
     color: var(--text-secondary);
     margin-top: 4px;
