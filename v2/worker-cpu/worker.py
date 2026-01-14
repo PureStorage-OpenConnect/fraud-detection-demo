@@ -500,7 +500,8 @@ def stage_inference() -> Dict[str, Any]:
     parquet_file = pq.ParquetFile(input_file)
     total_rows = parquet_file.metadata.num_rows
 
-    tracker = MetricsTracker('inference', total_rows)
+    # Stage 4 does READ + WRITE, so total is 2x rows
+    tracker = MetricsTracker('inference', total_rows * 2)
 
     # Read the features file
     read_start = time.time()
@@ -557,10 +558,6 @@ def stage_inference() -> Dict[str, Any]:
                 preds = np.zeros(len(batch))
 
         predictions.extend(preds)
-        # Don't update row count here - already counted during read
-        # Just update bytes for throughput tracking
-        tracker.bytes_processed += batch.nbytes
-        tracker.report()
 
     predictions = np.array(predictions)
 
@@ -592,13 +589,16 @@ def stage_inference() -> Dict[str, Any]:
 
     log(f"  Wrote {written_bytes / (1024**2):.1f} MB in {write_elapsed:.2f}s ({write_throughput:.1f} MB/s)")
 
+    # Update tracker with write rows
+    tracker.update(rows=total_rows, bytes_read=written_bytes)
+
     # Report final metrics with both score and write throughput
     total_elapsed = score_elapsed + write_elapsed
     total_bytes = score_metrics['bytes_processed'] + written_bytes
 
     metrics = {
-        'rows_processed': total_rows,
-        'total_rows': total_rows,
+        'rows_processed': total_rows * 2,  # READ + WRITE
+        'total_rows': total_rows * 2,
         'bytes_processed': total_bytes,
         'throughput_mbps': round(total_bytes / total_elapsed / (1024**2), 1) if total_elapsed > 0 else 0,
         'elapsed_seconds': round(total_elapsed, 3),
