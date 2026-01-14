@@ -557,7 +557,10 @@ def stage_inference() -> Dict[str, Any]:
                 preds = np.zeros(len(batch))
 
         predictions.extend(preds)
-        tracker.update(rows=len(batch), bytes_read=batch.nbytes)
+        # Don't update row count here - already counted during read
+        # Just update bytes for throughput tracking
+        tracker.bytes_processed += batch.nbytes
+        tracker.report()
 
     predictions = np.array(predictions)
 
