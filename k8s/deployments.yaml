@@ -1,0 +1,446 @@
+# Pipeline deployments (v4) — dedicated GPU per pod
+# All pipeline stages start at replicas=0; backend scales them on Start.
+# model-build Job (offline, pre-demo) still available: kubectl apply -f k8s/jobs/model-build.yaml
+#
+# Demo flow:
+#   1. Pre-demo: data-gather fills /data/raw (runs offline, 1-4 pods, then scales to 0)
+#   2. Demo: data-prep + model-train + triton + scoring start concurrently
+#
+# GPU layout (1 pod per GPU, 4 GPUs total):
+#   Node .44 (<GPU_NODE_1>): scoring (GPU 0) | triton (GPU 1)
+#   Node .40 (<GPU_NODE_2>): data-prep (GPU 0) | model-train (GPU 1)
+
+---
+# ── Backend ───────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: fraud-det-v31
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: <GPU_NODE_1>
+      serviceAccountName: backend-sa
+      containers:
+        - name: backend
+          image: <REGISTRY>/fraud-detection/backend:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: K8S_NAMESPACE
+              value: fraud-det-v31
+            - name: PROMETHEUS_URL
+              value: http://kube-prometheus-stack-prometheus.monitoring.svc.cluster.local:9090
+            - name: OUTPUT_PATH
+              value: /data/raw
+            - name: FEATURES_PATH
+              value: /data/features
+            - name: SCORES_PATH
+              value: /data/scores
+            - name: MODEL_REPO_PATH
+              value: /data/models
+            - name: FLASHBLADE_API_TOKEN
+              value: T-4c6c371d-2c99-4bb4-80f6-ab5e4879342a
+          volumeMounts:
+            - name: raw-data
+              mountPath: /data/raw
+            - name: features-data
+              mountPath: /data/features
+            - name: scores-data
+              mountPath: /data/scores
+            - name: model-repo
+              mountPath: /data/models
+            - name: demo-config
+              mountPath: /app/static/demo_config.json
+              subPath: demo_config.json
+          resources:
+            requests:
+              ephemeral-storage: "1Gi"
+            limits:
+              ephemeral-storage: "1Gi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+      volumes:
+        - name: raw-data
+          persistentVolumeClaim:
+            claimName: raw-data-pvc
+        - name: features-data
+          persistentVolumeClaim:
+            claimName: features-data-pvc
+        - name: scores-data
+          persistentVolumeClaim:
+            claimName: features-cpu-data-pvc   # repurposed as scores storage (100Gi)
+        - name: model-repo
+          persistentVolumeClaim:
+            claimName: model-repo-pvc
+        - name: demo-config
+          configMap:
+            name: demo-config
+
+---
+# ── data-gather (GPU — pre-demo synthetic data generation) ───────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-gather
+  namespace: fraud-det-v31
+spec:
+  replicas: 0
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: data-gather
+  template:
+    metadata:
+      labels:
+        app: data-gather
+    spec:
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        kubernetes.io/hostname: <GPU_NODE_1>
+      containers:
+        - name: data-gather
+          image: <REGISTRY>/fraud-detection/data-gather:latest
+          imagePullPolicy: Always
+          env:
+            - name: OUTPUT_PATH
+              value: /data/raw
+            - name: RUN_MODE
+              value: continuous
+            - name: CHUNK_SIZE
+              value: "10000000"
+            - name: TARGET_ROWS_PER_SEC
+              value: "0"
+            - name: KAGGLE_SEED_PATH
+              value: /app/seed-data/credit_card_transactions.csv.zip
+          volumeMounts:
+            - name: raw-data
+              mountPath: /data/raw
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "1Gi"
+            limits:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "1Gi"
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/tmp/.healthy')<120"]
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: raw-data
+          persistentVolumeClaim:
+            claimName: raw-data-pvc
+
+---
+# ── data-prep (GPU — n25 / .40) ───────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-prep
+  namespace: fraud-det-v31
+spec:
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: data-prep
+  template:
+    metadata:
+      labels:
+        app: data-prep
+    spec:
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        kubernetes.io/hostname: <GPU_NODE_2>
+      containers:
+        - name: data-prep
+          image: <REGISTRY>/fraud-detection/data-prep:latest
+          imagePullPolicy: Always
+          env:
+            - name: INPUT_PATH
+              value: /data/raw
+            - name: OUTPUT_PATH
+              value: /data/features
+            - name: BATCH_FILES
+              value: "5"
+            - name: CUDF_SPILL
+              value: "1"
+            - name: RMM_ALLOCATOR
+              value: "managed"
+            - name: NUMBA_CACHE_DIR
+              value: /data/features/.numba-cache
+            - name: WRITE_PIPES
+              value: "128"
+          volumeMounts:
+            - name: raw-data
+              mountPath: /data/raw
+            - name: features-data
+              mountPath: /data/features
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "1Gi"
+            limits:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "1Gi"
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/tmp/.healthy')<120"]
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: raw-data
+          persistentVolumeClaim:
+            claimName: raw-data-pvc
+        - name: features-data
+          persistentVolumeClaim:
+            claimName: features-data-pvc
+
+---
+# ── triton (GPU — n29 / .44) ──────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton
+  namespace: fraud-det-v31
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: triton
+  template:
+    metadata:
+      labels:
+        app: triton
+    spec:
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        kubernetes.io/hostname: <GPU_NODE_1>
+      containers:
+        - name: triton
+          image: <REGISTRY>/fraud-detection/triton:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000   # HTTP
+            - containerPort: 8001   # gRPC
+            - containerPort: 8002   # Metrics
+          env:
+            - name: MODEL_REPO
+              value: /data/models
+          volumeMounts:
+            - name: model-repo
+              mountPath: /data/models
+              readOnly: true
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "2Gi"
+            limits:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            failureThreshold: 30
+      volumes:
+        - name: model-repo
+          persistentVolumeClaim:
+            claimName: model-repo-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 2Gi
+
+---
+# ── scoring (GPU — n29 / .44) ─────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scoring
+  namespace: fraud-det-v31
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: scoring
+  template:
+    metadata:
+      labels:
+        app: scoring
+    spec:
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        kubernetes.io/hostname: <GPU_NODE_1>
+      containers:
+        - name: scoring
+          image: <REGISTRY>/fraud-detection/scoring:latest
+          imagePullPolicy: Always
+          env:
+            - name: FEATURES_PATH
+              value: /data/features
+            - name: SCORES_PATH
+              value: /data/scores
+            - name: TRITON_URL
+              value: triton:8001
+            - name: MODEL_NAME
+              value: fraud_gnn_gpu
+            - name: WINDOW_CHUNKS
+              value: "2"
+            - name: TRITON_RETRIES
+              value: "120"
+            - name: BATCH_FILES
+              value: "2"
+          volumeMounts:
+            - name: features-data
+              mountPath: /data/features
+            - name: scores-data
+              mountPath: /data/scores
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "1Gi"
+            limits:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "1Gi"
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/tmp/.healthy')<120"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 2
+            timeoutSeconds: 10
+      volumes:
+        - name: features-data
+          persistentVolumeClaim:
+            claimName: features-data-pvc
+        - name: scores-data
+          persistentVolumeClaim:
+            claimName: features-cpu-data-pvc   # repurposed as scores storage
+
+---
+# ── model-train (GPU — n25 / .40) ─────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-train
+  namespace: fraud-det-v31
+spec:
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: model-train
+  template:
+    metadata:
+      labels:
+        app: model-train
+    spec:
+      terminationGracePeriodSeconds: 5
+      nodeSelector:
+        kubernetes.io/hostname: <GPU_NODE_2>
+      containers:
+        - name: model-train
+          image: <REGISTRY>/fraud-detection/model-train:latest
+          imagePullPolicy: Always
+          env:
+            - name: INPUT_PATH
+              value: /data/features
+            - name: MODEL_REPO
+              value: /data/models
+            - name: TRAIN_INTERVAL_SEC
+              value: "30"
+            - name: MAX_FILES
+              value: "200"
+            - name: MIN_NEW_FILES
+              value: "20"
+            - name: GNN_EPOCHS
+              value: "64"
+            - name: GNN_HIDDEN
+              value: "64"
+            - name: GNN_OUT
+              value: "32"
+            - name: GNN_MAX_TX
+              value: "500000"
+          volumeMounts:
+            - name: features-data
+              mountPath: /data/features
+            - name: model-repo
+              mountPath: /data/models
+          resources:
+            requests:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "1Gi"
+            limits:
+              nvidia.com/gpu: "1"
+              ephemeral-storage: "1Gi"
+          livenessProbe:
+            exec:
+              command: ["python3", "-c", "import os,time; assert time.time()-os.path.getmtime('/tmp/.healthy')<120"]
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            failureThreshold: 2
+            timeoutSeconds: 10
+      volumes:
+        - name: features-data
+          persistentVolumeClaim:
+            claimName: features-data-pvc
+        - name: model-repo
+          persistentVolumeClaim:
+            claimName: model-repo-pvc
+
+---
+# ── Triton ClusterIP Service (scoring pods need DNS: triton:8000) ─────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton
+  namespace: fraud-det-v31
+spec:
+  selector:
+    app: triton
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: grpc
+      port: 8001
+      targetPort: 8001
+    - name: metrics
+      port: 8002
+      targetPort: 8002

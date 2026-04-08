@@ -1,0 +1,199 @@
+"""
+Pipeline control (v4): Deployment scaling for demo pipeline.
+Each pod gets a dedicated L40S GPU.
+
+Demo flow:
+  1. Pre-demo (offline): kubectl scale data-gather to fill /data/raw
+  2. Demo: start_pipeline() → data-prep + model-train + triton + scoring (4 GPU pods)
+"""
+import logging
+import os
+import shutil
+from pathlib import Path
+
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
+
+log = logging.getLogger(__name__)
+
+NAMESPACE = os.environ.get("K8S_NAMESPACE", "fraud-det-v31")
+
+# All deployments tracked for status/replica queries.
+ALL_DEPLOYMENTS = ["data-gather", "data-prep", "triton", "scoring", "model-train"]
+
+# Pipeline = everything except gather. 4 pods on 4 GPUs.
+PIPELINE_REPLICAS = {
+    "data-prep":     1,   # 1 dedicated GPU — mega-batch (100M+ rows/batch)
+    "triton":        1,   # 1 dedicated GPU
+    "scoring":       1,   # 1 dedicated GPU
+    "model-train":   1,   # 1 dedicated GPU
+}
+
+
+_k8s_clients = None
+
+def _k8s():
+    """Return (BatchV1Api, AppsV1Api, CoreV1Api) — cached singleton, loaded once."""
+    global _k8s_clients
+    if _k8s_clients is None:
+        try:
+            config.load_incluster_config()
+        except config.ConfigException:
+            config.load_kube_config()
+        _k8s_clients = client.BatchV1Api(), client.AppsV1Api(), client.CoreV1Api()
+    return _k8s_clients
+
+
+def _scale(apps_v1: client.AppsV1Api, name: str, replicas: int) -> None:
+    try:
+        apps_v1.patch_namespaced_deployment_scale(
+            name=name,
+            namespace=NAMESPACE,
+            body={"spec": {"replicas": replicas}},
+        )
+        log.info("Scaled deployment/%s to %d", name, replicas)
+    except ApiException as e:
+        log.warning("scale %s: %s", name, e.reason)
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def start_pipeline() -> dict:
+    """Scale pipeline Deployments (prep + train + triton + scoring).
+    Data-gather must be stopped first (offline, pre-demo only)."""
+    _, apps_v1, _ = _k8s()
+    _scale(apps_v1, "data-gather", 0)  # safety: ensure gather is off
+    for dep, n in PIPELINE_REPLICAS.items():
+        _scale(apps_v1, dep, n)
+    return {"status": "started"}
+
+
+def stop_pipeline() -> dict:
+    """Scale all Deployments to 0 (gather + pipeline)."""
+    _, apps_v1, _ = _k8s()
+    for dep in ALL_DEPLOYMENTS:
+        _scale(apps_v1, dep, 0)
+    return {"status": "stopped"}
+
+
+def reset_pipeline(raw_path: Path, *output_paths: Path) -> dict:
+    """Stop pipeline, re-queue raw data, clear downstream output.
+
+    Raw files (.done / .processing) are renamed back to .parquet so the
+    pre-generated data can be reprocessed without re-running data-gather.
+    Features and scores directories are wiped (they get regenerated).
+    """
+    stop_pipeline()
+    # Re-queue raw data: rename .done/.processing back to .parquet
+    requeued = 0
+    if raw_path and raw_path.exists():
+        for suffix in (".done", ".processing"):
+            for f in raw_path.glob(f"*{suffix}"):
+                orig = f.with_name(f.name[: -len(suffix)])
+                try:
+                    f.rename(orig)
+                    requeued += 1
+                except OSError:
+                    pass
+        log.info("Re-queued %d raw files in %s", requeued, raw_path)
+    # Clear downstream output dirs (features, scores)
+    cleared = []
+    for p in output_paths:
+        if p is None:
+            continue
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
+            log.info("Cleared %s", p)
+        p.mkdir(parents=True, exist_ok=True)
+        p.chmod(0o777)
+        cleared.append(str(p))
+    return {"status": "reset", "requeued_raw": requeued, "cleared": cleared}
+
+
+_ERROR_REASONS = {
+    "OOMKilled", "CrashLoopBackOff", "Error",
+    "ErrImagePull", "ImagePullBackOff",
+    "CreateContainerConfigError", "InvalidImageName",
+}
+_ERROR_STATES = {"OOMKilled", "CrashLoop", "Error", "Terminating", "NotFound"}
+
+
+def _pod_level_state(core_v1: client.CoreV1Api, dep: str) -> str:
+    """Inspect pod container statuses to distinguish Pending/Starting/error states."""
+    try:
+        pods = core_v1.list_namespaced_pod(
+            namespace=NAMESPACE, label_selector=f"app={dep}"
+        )
+    except ApiException:
+        return "Error"
+    for pod in pods.items:
+        if pod.metadata.deletion_timestamp:
+            return "Terminating"
+        phase = (pod.status.phase or "") if pod.status else ""
+        if phase == "Failed":
+            return "Error"
+        if phase == "Pending":
+            return "Pending"
+        for cs in (pod.status.container_statuses or []):
+            waiting    = cs.state.waiting    if cs.state else None
+            terminated = cs.state.terminated if cs.state else None
+            if waiting and waiting.reason in _ERROR_REASONS:
+                if waiting.reason == "OOMKilled":         return "OOMKilled"
+                if waiting.reason == "CrashLoopBackOff":  return "CrashLoop"
+                return "Error"
+            if terminated and terminated.reason in {"OOMKilled", "Error"}:
+                return terminated.reason
+    return "Starting"
+
+
+def get_service_states() -> dict:
+    """Return per-deployment status with pod-level error detail when not Ready."""
+    _, apps_v1, core_v1 = _k8s()
+    states: dict = {}
+    for dep in ALL_DEPLOYMENTS:
+        try:
+            d = apps_v1.read_namespaced_deployment(name=dep, namespace=NAMESPACE)
+            ready   = d.status.ready_replicas or 0
+            desired = d.spec.replicas or 0
+            if desired == 0:
+                states[dep] = "Stopped"
+            elif ready >= desired:
+                states[dep] = "Ready"
+            else:
+                states[dep] = _pod_level_state(core_v1, dep)
+        except ApiException:
+            states[dep] = "NotFound"
+    return states
+
+
+def get_health_status(states: dict = None) -> str:
+    """Return overall pipeline health: 'Live', 'Starting', or 'Error'.
+    Pass pre-fetched states to avoid a redundant K8s round-trip."""
+    if states is None:
+        states = get_service_states()
+    pipeline_states = [states.get(dep, "Stopped") for dep in PIPELINE_REPLICAS]
+    if all(s == "Ready" for s in pipeline_states):
+        return "Live"
+    if all(s == "Stopped" for s in pipeline_states):
+        return "Offline"
+    if any(s in _ERROR_STATES for s in pipeline_states):
+        return "Error"
+    return "Starting"
+
+
+def get_replica_counts() -> dict:
+    """Return {name: {desired, ready}} for all pipeline Deployments."""
+    _, apps_v1, _ = _k8s()
+    counts: dict = {}
+    for dep in ALL_DEPLOYMENTS:
+        try:
+            d = apps_v1.read_namespaced_deployment(name=dep, namespace=NAMESPACE)
+            counts[dep] = {
+                "desired": d.spec.replicas or 0,
+                "ready":   d.status.ready_replicas or 0,
+            }
+        except ApiException:
+            counts[dep] = {"desired": 0, "ready": 0}
+    return counts

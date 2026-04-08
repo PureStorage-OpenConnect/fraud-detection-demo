@@ -1,0 +1,2 @@
+# pandas, numpy, pyarrow already in RAPIDS conda env — don't reinstall via pip
+psutil>=5.9.0
